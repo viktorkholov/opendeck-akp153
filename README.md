@@ -4,6 +4,43 @@
 
 An unofficial plugin for Mirabox HSV293S-family devices
 
+> **Fork: `maddog-performance-optimization`.** This branch makes page switches faster on slow-to-write devices. It was tuned on a Maddog GK150K. It is not affiliated with upstream, so please don't report issues from this fork to [4ndv/opendeck-akp153](https://github.com/4ndv/opendeck-akp153).
+>
+> The changes were written with an AI coding assistant (Claude) and reviewed by the fork's owner.
+
+## Why page switches were slow
+
+Measured on a Maddog GK150K (firmware 3.00, USB high-speed):
+
+| Write | Time per 512-byte report |
+|---|---|
+| Image data | ~3.8 ms |
+| Command (keep-alive, clear) | ~0.5 ms |
+
+On a page switch, OpenDeck clears the whole screen and then sends all 18 keys. With upstream's quality-90 JPEGs that is about 40–55 KB, so the keys stay dark for most of a second and then the page appears all at once.
+
+## What this branch changes
+
+All of it lives in `src/fast.rs`, plus a few hooks in `src/device.rs`.
+
+| | Upstream 0.11.1 | This branch |
+|---|---|---|
+| Image OpenDeck sends again unchanged | Re-encoded and re-sent | Skipped: the key already shows it |
+| JPEG quality | 90 | 75, about a third fewer bytes |
+| Whole-screen clear on page switch | Sent at once, so the screen goes dark | Held back: the old page stays until the new one has arrived, then they swap in one flush |
+| Single-key clear | Its own command, ~40 ms each, unbatched | A black image that joins the batched flush |
+| Flush debounce | 50 ms | 20 ms (a page switch waits up to 300 ms for all its keys) |
+| Log | `Flushing pending updates` | `Flushed N images, B bytes in T ms` |
+
+BMP-mode devices keep the upstream image path.
+
+## Install over an existing plugin
+
+1. Build it: `cargo build --release`.
+2. Quit OpenDeck.
+3. Copy `target/release/opendeck-akp153` over `opendeck-akp153-mac` in `~/Library/Application Support/opendeck/plugins/st.lynx.plugins.opendeck-akp153.sdPlugin/`. Keep the original so you can roll back.
+4. Start OpenDeck.
+
 ## OpenDeck version
 
 Requires OpenDeck 2.5.0 or newer

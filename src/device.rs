@@ -1,13 +1,13 @@
 use data_url::DataUrl;
 use image::load_from_memory_with_format;
-use mirajazz::{device::Device, error::MirajazzError, state::DeviceStateUpdate};
+use mirajazz::{device::Device, error::MirajazzError, state::DeviceStateUpdate, types::ImageMode};
 use openaction::{OUTBOUND_EVENT_MANAGER, SetImageEvent};
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    DEVICES, FLUSH_NOTIFY, TOKENS,
+    DEVICES, FLUSH_NOTIFY, TOKENS, fast,
     inputs::opendeck_to_device,
     mappings::{
         COL_COUNT, CandidateDevice, ENCODER_COUNT, KEY_COUNT, Kind, ROW_COUNT,
@@ -26,6 +26,7 @@ pub async fn device_task(candidate: CandidateDevice, token: CancellationToken) {
         device.set_brightness(50).await?;
         device.clear_all_button_images().await?;
         device.flush().await?;
+        fast::forget(&candidate.id).await;
 
         Ok(device)
     }()
@@ -140,20 +141,50 @@ async fn device_flush_task(id: &String, notify: Arc<Notify>, token: Cancellation
             _ = token.cancelled() => break,
         }
 
-        // Keep resetting the window while more images arrive; fire when quiet for 16ms.
+        // Keep resetting the window while more images arrive; fire when quiet for fast::DEBOUNCE.
+        // During a page switch keep waiting until every key of the new page has arrived, so the page
+        // changes in one flush.
         loop {
-            tokio::select! {
-                _ = notify.notified() => {}
-                _ = token.cancelled() => return,
-                _ = tokio::time::sleep(Duration::from_millis(50)) => break,
+            loop {
+                tokio::select! {
+                    _ = notify.notified() => {}
+                    _ = token.cancelled() => return,
+                    _ = tokio::time::sleep(fast::DEBOUNCE) => break,
+                }
+            }
+            match fast::page_wait(id).await {
+                fast::PageWait::Ready => break,
+                fast::PageWait::Wait(left) => {
+                    tokio::select! {
+                        _ = notify.notified() => {}
+                        _ = token.cancelled() => return,
+                        _ = tokio::time::sleep(left) => {}
+                    }
+                }
+                fast::PageWait::Blank(missing) => {
+                    if let Some(device) = DEVICES.read().await.get(id) {
+                        for position in missing {
+                            queue_black(device, id, position).await.ok();
+                        }
+                    }
+                    break;
+                }
             }
         }
 
         let flush_result = {
             let guard = DEVICES.read().await;
             if let Some(device) = guard.get(id) {
-                log::info!("Flushing pending updates");
-                device.flush().await
+                let (images, bytes) = fast::take_queued(id).await;
+                let started = std::time::Instant::now();
+                let result = device.flush().await;
+                log::info!(
+                    "Flushed {} images, {} bytes in {} ms",
+                    images,
+                    bytes,
+                    started.elapsed().as_millis()
+                );
+                result
             } else {
                 Ok(())
             }
@@ -229,10 +260,10 @@ pub async fn handle_set_image(
     id: &str,
     evt: SetImageEvent,
 ) -> Result<(), MirajazzError> {
+    let kind = Kind::from_vid_pid(device.vid, device.pid).unwrap(); // Safe to unwrap here, because device is already filtered
+
     match (evt.position, evt.image) {
         (Some(position), Some(image)) => {
-            log::info!("Setting image for button {}", position);
-
             // OpenDeck sends image as a data url, so parse it using a library
             let url = DataUrl::process(image.as_str()).unwrap(); // Isn't expected to fail, so unwrap it is
             let (body, _fragment) = url.decode_to_vec().unwrap(); // Same here
@@ -244,37 +275,65 @@ pub async fn handle_set_image(
                 return Ok(()); // Not a fatal error, enough to just log it
             }
 
-            let image = load_from_memory_with_format(body.as_slice(), image::ImageFormat::Jpeg)?;
-
-            let kind = Kind::from_vid_pid(device.vid, device.pid).unwrap(); // Safe to unwrap here, because device is already filtered
-
-            device
-                .set_button_image(
-                    opendeck_to_device(position),
-                    get_image_format_for_key(&kind, position),
-                    image,
-                )
-                .await?;
-
-            if let Some(notify) = FLUSH_NOTIFY.read().await.get(id) {
-                notify.notify_one();
+            if let fast::Plan::Skip = fast::plan(id, position, fast::hash(&body)).await {
+                log::info!("Button {} already shows this image", position);
+                notify_flush(id).await; // a page switch may be waiting for this key
+                return Ok(());
             }
+
+            log::info!("Setting image for button {}", position);
+
+            let image = load_from_memory_with_format(body.as_slice(), image::ImageFormat::Jpeg)?;
+            let format = get_image_format_for_key(&kind, position);
+
+            if matches!(format.mode, ImageMode::JPEG) {
+                let data = fast::convert(format, image)?;
+                fast::queued(id, data.len()).await;
+                device
+                    .write_image(opendeck_to_device(position), &data)
+                    .await?;
+            } else {
+                device
+                    .set_button_image(opendeck_to_device(position), format, image)
+                    .await?;
+            }
+
+            notify_flush(id).await;
         }
         (Some(position), None) => {
-            device
-                .clear_button_image(opendeck_to_device(position))
-                .await?;
-
-            if let Some(notify) = FLUSH_NOTIFY.read().await.get(id) {
-                notify.notify_one();
+            // A black image instead of the device's clear command: it joins the batched flush,
+            // while each clear command blocks for about 40 ms.
+            if let fast::Plan::Send = fast::plan(id, position, fast::black_hash()).await {
+                queue_black(device, id, position).await?;
             }
+            notify_flush(id).await;
         }
         (None, None) => {
-            device.clear_all_button_images().await?;
-            device.flush().await?;
+            // OpenDeck clears the whole screen before drawing a new page. Keep the old page up instead;
+            // the flush task waits for the new page's keys and swaps them in at once.
+            fast::page_switch(id, KEY_COUNT).await;
+            notify_flush(id).await;
         }
         _ => {}
     }
 
     Ok(())
+}
+
+async fn notify_flush(id: &str) {
+    if let Some(notify) = FLUSH_NOTIFY.read().await.get(id) {
+        notify.notify_one();
+    }
+}
+
+async fn queue_black(device: &Device, id: &str, position: u8) -> Result<(), MirajazzError> {
+    let kind = Kind::from_vid_pid(device.vid, device.pid).unwrap();
+    let format = get_image_format_for_key(&kind, position);
+    match fast::convert(format, fast::black(&format)) {
+        Ok(data) => {
+            fast::queued(id, data.len()).await;
+            device.write_image(opendeck_to_device(position), &data).await
+        }
+        Err(_) => device.clear_button_image(opendeck_to_device(position)).await,
+    }
 }

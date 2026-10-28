@@ -14,6 +14,7 @@ use watcher::watcher_task;
 use tokio::signal::unix::{SignalKind, signal};
 
 mod device;
+mod fast;
 mod inputs;
 mod mappings;
 mod watcher;
