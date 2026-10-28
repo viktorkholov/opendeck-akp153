@@ -14,7 +14,7 @@ An unofficial plugin for Mirabox HSV293S-family devices
 
 ## Before: press, then wait ~1.2–1.3 s in the dark
 
-<p align="center"><img src="docs/upstream-v2.gif" width="100%" alt="Upstream: the screen goes black right after the press and the new page appears all at once about 1.25 s later"></p>
+<p align="center"><img src="docs/upstream-v3.gif" width="100%" alt="Upstream: the screen goes black right after the press and the new page appears all at once about 1.25 s later"></p>
 
 With upstream 0.11.1, the whole screen goes black the moment you press a page key. Then you wait, and **~1.2–1.3 s** later the new page appears all at once.
 
@@ -28,19 +28,19 @@ How the new page appears is up to you.
 
 ### `wave`: ~0.75 s from press to the whole page
 
-<p align="center"><img src="docs/page-wave-v2.gif" width="100%" alt="This fork, wave: the new page sweeps in diagonally from the top left, complete about 0.75 s after the press"></p>
+<p align="center"><img src="docs/page-wave-v3.gif" width="100%" alt="This fork, wave: the new page sweeps in diagonally from the top left, complete about 0.75 s after the press"></p>
 
 A diagonal from the top left. Measured: **0.75 s** median from the press to the complete page (0.71–0.77 s over 17 switches).
 
 ### `snake`: ~1.08 s
 
-<p align="center"><img src="docs/page-snake-v2.gif" width="100%" alt="This fork, snake: the new page replaces the old one key by key down and up the columns"></p>
+<p align="center"><img src="docs/page-snake-v3.gif" width="100%" alt="This fork, snake: the new page replaces the old one key by key down and up the columns"></p>
 
 One key at a time, down and up the columns. Measured: **1.08 s** median (1.02–1.11 s over 15 switches). Each key is its own wave, and every wave ends with a ~38 ms refresh, so the snake costs more than the wave.
 
 ### `classic`: ~0.55 s
 
-<p align="center"><img src="docs/page-classic-v2.gif" width="50%" alt="This fork, classic: the whole page at once, without the black screen"></p>
+<p align="center"><img src="docs/page-classic-v3.gif" width="50%" alt="This fork, classic: the whole page at once, without the black screen"></p>
 
 The whole page at once, like upstream but without the black screen. ~0.55 s, estimated from the send time.
 
@@ -48,7 +48,7 @@ The whole page at once, like upstream but without the black screen. ~0.55 s, est
 
 The driver now knows two kinds of pages, and each has its own animation.
 
-<p align="center"><img src="docs/structure.png" width="100%" alt="Desktop 1 and Desktop 2 swap with pages; a folder in a key of Desktop 1 opens and returns with back; the layers are controller, side screen and content"></p>
+<p align="center"><img src="docs/structure-v3.png" width="100%" alt="Desktop 1 and Desktop 2 swap with pages; a folder in a key of Desktop 1 opens and returns with back; the layers are controller, side screen and content"></p>
 
 - **Desktops** sit side by side. The `pages` key moves to the next one and wraps around after the last. They animate with the page animation: `classic`, `wave` or `snake`.
 - **Folders** live in a key on a desktop, or inside another folder. In a folder the same slot holds `back`, which goes up one level. A folder **opens with a reverse snake and closes with a snake**, the same move played backwards.
@@ -61,11 +61,11 @@ On every page the slots split into three layers. Only content animates:
 | Side screen | the last column | Stays lit, and is redrawn only if it changes |
 | Content | everything else | Animates. Each key goes straight to its final image; empty ones become dark tiles |
 
-<p align="center"><img src="docs/folder-v2.gif" width="100%" alt="A folder opens as a reverse snake and closes with back as a snake"></p>
+<p align="center"><img src="docs/folder-v3.gif" width="100%" alt="A folder opens as a reverse snake and closes with back as a snake"></p>
 
 The driver needs only the nav key's slot (`nav 16`) to tell switches apart. A press on it switches desktops, or closes a folder when one is open. A press on any other key that changes the page opens a folder. Desktops and folders are ordinary OpenDeck profiles with Switch Profile keys.
 
-<p align="center"><img src="docs/tour-v2.gif" width="100%" alt="A tour: Desktop 1 to Desktop 2 and back with pages, then a folder opens and closes"></p>
+<p align="center"><img src="docs/tour-v3.gif" width="100%" alt="A tour: Desktop 1 to Desktop 2 and back with pages, then a folder opens and closes"></p>
 
 ## Upstream vs this fork
 
@@ -181,7 +181,7 @@ To change animations from the deck itself, use keys that run a shell command to 
 
 The folder opening that was dropped, next to the one that was kept:
 
-![Darkening first leaves ~0.55 s with nothing new on screen; rsnake starts changing keys at once](docs/folder-dropped-v2.gif)
+![Darkening first leaves ~0.55 s with nothing new on screen; rsnake starts changing keys at once](docs/folder-dropped-v3.gif)
 
 ## Install over an existing plugin
 

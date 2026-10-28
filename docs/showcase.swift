@@ -16,7 +16,7 @@ import UniformTypeIdentifiers
 let out = CommandLine.arguments.dropFirst().first ?? "docs"
 
 /// Part of every GIF's file name: GitHub caches README images by URL, so a new version needs a new name.
-let VERSION = "v2"
+let VERSION = "v3"
 
 /// Pixels per point, so the images stay sharp when the README shows them large.
 let SCALE: CGFloat = 2
@@ -154,12 +154,13 @@ func draw(_ tile: Tile?, in rect: CGRect) {
     let shape = NSBezierPath(roundedRect: rect, xRadius: 10, yRadius: 10)
     switch tile {
     case .number(let n, let hue):
-        let top = NSColor(hue: hue, saturation: 0.38, brightness: 1, alpha: 1)
-        let bottom = NSColor(hue: hue, saturation: 0.55, brightness: 0.93, alpha: 1)
+        // A negative hue is a grey tile, for the layers map, where the outlines must stand out.
+        let top = hue < 0 ? hex(0x3f3f46) : NSColor(hue: hue, saturation: 0.38, brightness: 1, alpha: 1)
+        let bottom = hue < 0 ? hex(0x2f2f35) : NSColor(hue: hue, saturation: 0.55, brightness: 0.93, alpha: 1)
         NSGradient(starting: top, ending: bottom)!.draw(in: shape, angle: -90)
-        text("\(n)", 30, hex(0x1e1b4b, 0.8), at: CGPoint(x: rect.midX, y: rect.midY - 19), weight: .heavy, center: true)
+        text("\(n)", 30, hue < 0 ? hex(0xffffff, 0.35) : hex(0x1e1b4b, 0.8), at: CGPoint(x: rect.midX, y: rect.midY - 19), weight: .heavy, center: true)
     case .folder(let hue):
-        NSColor(hue: hue, saturation: 0.5, brightness: 0.45, alpha: 1).setFill(); shape.fill()
+        (hue < 0 ? hex(0x2f2f35) : NSColor(hue: hue, saturation: 0.5, brightness: 0.45, alpha: 1)).setFill(); shape.fill()
         if let img = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 26, weight: .semibold).applying(.init(paletteColors: [hex(0xddd6fe)]))) {
             img.draw(in: CGRect(x: rect.midX - img.size.width / 2, y: rect.midY - img.size.height / 2 + 4, width: img.size.width, height: img.size.height))
@@ -334,7 +335,14 @@ do {
         still("Desktop 1", desktopA, at: CGPoint(x: left, y: top), scale: s)
         still("Desktop 2", desktopB, at: CGPoint(x: right, y: top), scale: s)
         still("Folder (in a key of Desktop 1)", folder, at: CGPoint(x: left, y: bottom), scale: s)
-        still("Layers", desktopA, at: CGPoint(x: right, y: bottom), scale: s)
+        let grey = desktopA.mapValues { tile -> Tile in
+            switch tile {
+            case .number(let n, _): return .number(n, -1)
+            case .folder: return .folder(-1)
+            default: return tile
+            }
+        }
+        still("Layers", grey, at: CGPoint(x: right, y: bottom), scale: s)
         layers(at: CGPoint(x: right, y: bottom), scale: s)
         let midY = top + (deckH - HEADER) * s / 2
         arrow(from: CGPoint(x: left + w + 12, y: midY), to: CGPoint(x: right - 12, y: midY), "pages",
@@ -354,6 +362,6 @@ do {
             x += width(name)
         }
     }
-    try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "\(out)/structure.png"))
-    print("structure.png")
+    try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "\(out)/structure-\(VERSION).png"))
+    print("structure-\(VERSION).png")
 }
