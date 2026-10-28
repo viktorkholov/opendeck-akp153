@@ -8,46 +8,94 @@ An unofficial plugin for Mirabox HSV293S-family devices
 >
 > The changes were written with an AI coding assistant (Claude) and reviewed by the fork's owner.
 
-## Why page switches were slow
-
-Measured on a Maddog GK150K (firmware 3.00, USB high-speed):
-
-| Write | Time per 512-byte report |
-|---|---|
-| Image data | ~3.8 ms |
-| Command (keep-alive, clear) | ~0.5 ms |
-
-On a page switch, OpenDeck clears the whole screen and then sends all 18 keys. With upstream's quality-90 JPEGs that is about 40–55 KB, so the keys stay dark for most of a second and then the page appears all at once.
-
-## What this branch changes
-
-Measured on the GK150K, the device needs ~30 ms per key image whatever its size (15 images of 15 KB took 442 ms, of 30 KB 475 ms), and ~40 ms per refresh. A command such as brightness takes ~0.5 ms. So the number of images is what costs, and so is how the wait looks. All of it lives in `src/fast.rs`, plus hooks in `src/device.rs` and `src/main.rs`.
+## Results on a Maddog GK150K
 
 | | Upstream 0.11.1 | This branch |
 |---|---|---|
-| Image OpenDeck sends again unchanged | Re-encoded and re-sent | Skipped, because the key already shows it. Keys shared by pages cost nothing on a switch |
-| Whole-screen clear on page switch | Sent at once, so the screen goes black for most of a second | Ignored: the screen dims at once and the new page draws in waves, then brightness ramps back |
-| Key press | No feedback until OpenDeck redraws | The pressed key flashes (brightened, white frame) in ~10 ms, and its own image comes back if nothing replaces it |
-| Background key updates during a page switch | Queued ahead of the page | The page takes over, and the rest wait behind it |
-| Single-key clear | Its own command, ~40 ms each, unbatched | A black image that joins the batch |
-| Flush debounce | 50 ms | 15 ms (a page switch waits up to 300 ms for all its keys) |
+| Response to a key press | ~0.15 s, when the screen goes black | **~10 ms**: the pressed key flashes |
+| Black screen on a page switch | ~0.6–0.8 s | **None**: the old page stays until the new one draws over it |
+| Whole page on screen | ~0.8 s, all at once after the dark | `classic` ~0.55 s, `wave` ~0.7 s, `snake` ~1.2 s |
+| Keys that look the same on both pages | Redrawn on every switch | Skipped, ~30 ms saved per key |
+| Background key updates during a switch | Sent ahead of the page | Wait behind the page |
+
+## Why page switches were slow
+
+Measured with millisecond logs and direct HID writes on a GK150K (firmware 3.00, USB 2.0 high-speed):
+
+| What the device does | Time |
+|---|---|
+| Takes one key image (85×85 JPEG), whatever its size | **~30 ms**. 15 images of 15 KB took 442 ms, and 15 of 30 KB took 475 ms |
+| Refresh (STP), which shows what was uploaded | ~40 ms |
+| Clear one key (CLE) | ~40 ms, unbatched |
+| Any other command (brightness, keep-alive) | ~0.5 ms |
+
+The device holds uploaded images until a refresh. USB is not the bottleneck: commands pass in half a millisecond. The cost is the number of images and refreshes.
+
+Upstream on a page switch:
+
+1. OpenDeck clears the whole screen, and the device goes black at once.
+2. OpenDeck sends all 18 keys, including the ones that did not change.
+3. The plugin waits 50 ms of quiet, then uploads them all with one refresh at the end.
+
+The keys stay dark for most of a second, then the page appears all at once.
+
+## What this branch changes
+
+Everything lives in `src/fast.rs`, with hooks in `src/device.rs` and `src/main.rs`.
+
+| | Upstream 0.11.1 | This branch |
+|---|---|---|
+| Image OpenDeck sends again unchanged | Re-encoded and re-sent | Skipped, because the key already shows it |
+| Whole-screen clear on page switch | Sent at once, so the screen goes black | Ignored. The new page draws over the old one |
+| Key press | No feedback until OpenDeck redraws | The pressed key brightens with a white frame in ~10 ms. If nothing replaces it, its own image comes back after 160 ms |
+| Page drawing | One refresh at the end | In waves, a refresh after each, in the order of the chosen animation |
+| Background updates during a page switch | Queued ahead of the page | The page takes over, and the rest wait behind it |
+| Single-key clear | Its own command, ~40 ms each | A black image that joins the batch |
+| Flush debounce | 50 ms | 15 ms. A page switch flushes as soon as all its keys are in, or after at most 300 ms |
 | JPEG quality | 90 | 85 |
 | Log | `Flushing pending updates` | `Flushed N images, B bytes in W waves, T ms` |
 
-The look is set in `~/Library/Application Support/opendeck/akp153-animation` and read on every flush. The file holds one wave order plus the words `dim` and `flash` to turn those on. Without the file the default is `diagonal dim flash`; the GK150K setup uses `diagonal flash`.
+## Animations
 
-| Order | Waves |
+The look is set in `~/Library/Application Support/opendeck/akp153-animation`, which is read on every flush, so a change applies on the next page switch. The file holds one order plus optional words. Without the file the default is `wave flash`.
+
+| Order | How the page appears | Page time on the GK150K |
+|---|---|---|
+| `classic` (`batch`) | Everything at once, like upstream but without the black screen | ~0.55 s |
+| `wave` (`diagonal`) | One diagonal at a time, top-left to bottom-right | ~0.7 s |
+| `snake` | One key at a time down and up the columns: 0, 6, 12, 13, 7, 1, 2, 8, 14, 3, 9, 15, 16, 10, 4 | ~1.2 s |
+| `bands` | The same diagonal in three waves | ~0.55 s |
+| `rows` | Top to bottom | |
+| `sweep` | Column by column from the pressed key | |
+| `rings` | Rings around the pressed key | |
+| `keys` | One key at a time, in position order | |
+
+| Word | Effect |
 |---|---|
-| `diagonal` | top-left to bottom-right, one diagonal at a time (8 waves) |
-| `pincer` | top rows left to right (the middle one a step behind) while the bottom row runs right to left |
-| `bands` | the same diagonal in three waves, ~160 ms faster |
-| `rows` | top to bottom |
-| `sweep` | column by column from the pressed key |
-| `rings` | rings around the pressed key |
-| `keys` | one key at a time |
-| `batch` | everything at once, the cheapest |
+| `flash` | Flash the pressed key |
+| `dim` | Dim the screen to 12% during a page switch and ramp it back afterwards |
+| `once` | One refresh at the end instead of one per wave. The page appears all at once, ~240 ms sooner |
 
-The GK150K holds uploaded images until a refresh, so every wave ends with one (~40 ms each). Add the word `once` to refresh only at the end: the page then appears all at once, ~240 ms sooner. BMP-mode devices keep the upstream image path.
+Each wave costs a ~40 ms refresh, so more waves look smoother and take longer.
+
+To switch animations from the deck itself, use a key that runs a shell command and writes the file, e.g. `echo "snake flash" > ~/Library/Application\ Support/opendeck/akp153-animation`.
+
+## Tried and dropped
+
+| Idea | Result |
+|---|---|
+| Lower JPEG quality (90 → 75) to send fewer bytes | Almost no effect, because the device's cost is per image, not per byte (442 vs 475 ms for half the bytes). Set to 85 to keep keys sharp |
+| Keep the old page up until the whole new page was in, then show it at once | No black screen, but nothing happened for ~0.55 s after a press, which felt like lag. Replaced by the key flash and waves |
+| Dim the screen during a switch (`dim`) | Works (~0.5 ms per brightness command), but looked worse than plain waves. Off by default |
+| Three-band diagonal (`bands`) | ~160 ms faster than `wave`, but the wave looked less smooth |
+| One refresh per page instead of per wave (`once`) | ~240 ms faster, but the device holds images until a refresh, so the wave disappears and the page pops in at once |
+| "Pincer" animation (top rows left to right, bottom row right to left) | Looked messy. Removed |
+| Start the switch on key down instead of key up | The GK150K sends one input report per press, with the state byte always 0, so there is no separate press and release to act on |
+| Larger HID reports | The report size (512 bytes) is fixed by the device's descriptor |
+| Shorter debounce (50 → 20 → 15 ms) | Kept, but it saves only a few ms. The device time dominates |
+| Faster cable, hub, USB-C adapter | No effect possible. The device already runs at USB 2.0 high-speed, and commands take 0.5 ms |
+| Firmware update | None published for this device, and the firmware is closed |
+| Preload the next page into the device's buffer, then flip with one refresh | Should make switches ~50–100 ms, but the plugin would need to know the next page in advance (OpenDeck pages would have to be driven by a plugin). Not done, because the waves were preferred |
 
 ## Install over an existing plugin
 

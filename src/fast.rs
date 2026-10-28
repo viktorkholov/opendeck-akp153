@@ -1,20 +1,21 @@
 //! Faster page switches for slow-to-write devices (maddog-performance-optimization).
 //!
 //! Measured on a Maddog GK150K: the device needs ~30 ms per key image whatever its size (15 images
-//! of 15 KB took 442 ms, of 30 KB 475 ms), while a command report (brightness, refresh, keep-alive)
-//! takes ~0.5 ms. So the number of images is what costs, and this module:
+//! of 15 KB took 442 ms, of 30 KB 475 ms) and ~40 ms per refresh (STP), and holds uploaded images
+//! until a refresh; any other command takes ~0.5 ms. So the number of images is what costs, and
+//! this module:
 //!
 //! - skips images identical to what the key already shows (OpenDeck redraws every key on a switch);
 //! - turns clears into black images, so they join the batch instead of blocking ~40 ms each;
 //! - ignores OpenDeck's "clear the whole screen" on a page switch, so the screen never goes black;
 //! - answers a press at once: the pressed key flashes (one image, ~6 ms) before anything else;
-//! - on a page switch dims the screen at once (a command, ~0.5 ms), draws the new page in waves
-//!   (top-left to bottom-right by default) and brings the brightness back up when it is in;
+//! - draws a new page in waves, a refresh after each, in the order of the chosen animation;
+//!   optionally dims the screen meanwhile;
 //! - lets a page switch overtake background key updates that are being sent.
 //!
 //! The look is set in `~/Library/Application Support/opendeck/akp153-animation`, read on every flush:
-//! one wave order (`diagonal`, `rings`, `sweep`, `rows`, `keys`, `batch`) plus the words `dim` and
-//! `flash` to turn those on. Default: `diagonal dim flash`.
+//! one order (`classic`, `wave`, `snake`, `bands`, `rows`, `sweep`, `rings`, `keys`) plus the words
+//! `flash`, `dim` and `once` (a single refresh at the end). Default: `wave flash`.
 
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
@@ -51,6 +52,9 @@ const BLACK: u64 = 0;
 
 /// Grid of OpenDeck positions: 3 rows of 6, the side keys being the last column.
 const COLUMNS: i32 = 6;
+
+/// Key order of the `snake` animation (OpenDeck positions).
+const SNAKE: [u8; 15] = [0, 6, 12, 13, 7, 1, 2, 8, 14, 3, 9, 15, 16, 10, 4];
 
 #[derive(Default)]
 pub struct DeviceState {
@@ -94,14 +98,23 @@ pub fn look() -> Look {
             std::path::Path::new(&home).join("Library/Application Support/opendeck/akp153-animation")
         })
         .and_then(|path| std::fs::read_to_string(path).ok())
-        .unwrap_or_else(|| "diagonal dim flash".to_string());
+        .unwrap_or_else(|| "wave flash".to_string());
     let words: Vec<&str> = text.split_whitespace().collect();
-    let orders = ["diagonal", "pincer", "bands", "rings", "sweep", "rows", "keys", "batch"];
+    let orders = ["diagonal", "snake", "bands", "rings", "sweep", "rows", "keys", "batch"];
+    // Friendlier names: `wave` is the diagonal, `classic` is everything at once like upstream.
+    fn alias(w: &str) -> &str {
+        match w {
+            "wave" => "diagonal",
+            "classic" => "batch",
+            other => other,
+        }
+    }
     Look {
         order: words
             .iter()
+            .map(|w| alias(w))
             .find(|w| orders.contains(w))
-            .unwrap_or(&"diagonal")
+            .unwrap_or("diagonal")
             .to_string(),
         dim: words.contains(&"dim"),
         flash: words.contains(&"flash"),
@@ -263,13 +276,11 @@ pub async fn take_waves(id: &str) -> Vec<Vec<(u8, Vec<u8>)>> {
             "keys" => (p as i32, 0),
             // bands: the diagonal in three waves, ~160 ms faster since every wave costs a refresh
             "bands" => ((r + c) * 3 / (COLUMNS + 2), r + c),
-            // pincer: the top two rows run left to right (the middle one a step behind), while
-            // the bottom row runs right to left at the same time; the side column comes last
-            "pincer" => match (r, c) {
-                (_, 5) => (6, r),
-                (2, _) => (4 - c, r),
-                _ => (c + r, r),
-            },
+            // snake: one key at a time down and up the columns, in this order; the side column last
+            "snake" => (
+                SNAKE.iter().position(|&k| k == p).map_or(100 + p as i32, |i| i as i32),
+                0,
+            ),
             _ => (r + c, r), // diagonal: left to right and top to bottom at once
 
         }
