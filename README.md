@@ -39,6 +39,7 @@ The look is set in `~/Library/Application Support/opendeck/akp153-animation` and
 | Order | Waves |
 |---|---|
 | `diagonal` | top-left to bottom-right, one diagonal at a time (8 waves) |
+| `pincer` | top rows left to right (the middle one a step behind) while the bottom row runs right to left |
 | `bands` | the same diagonal in three waves, ~160 ms faster |
 | `rows` | top to bottom |
 | `sweep` | column by column from the pressed key |
