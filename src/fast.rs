@@ -8,12 +8,11 @@
 //! - skips images identical to what the key already shows (OpenDeck redraws every key on a switch);
 //! - turns clears into black images, so they join the batch instead of blocking ~40 ms each;
 //! - ignores OpenDeck's "clear the whole screen" on a page switch, so the screen never goes black;
-//! - draws a new page in waves, a refresh after each, in the order of the chosen animation;
-//!   optionally dims the screen meanwhile;
+//! - keeps the controller (the nav key) and the side screen out of animations, and draws the rest of
+//!   a new page in waves, a refresh after each, in the order of its animation;
 //! - lets a page switch overtake background key updates that are being sent.
 //!
-//! The look is set per kind of switch (a page, a folder opening, a folder closing) in
-//! `~/Library/Application Support/opendeck/akp153-animation`; see [config].
+//! Animations are set in `~/Library/Application Support/opendeck/akp153-animation`; see [config].
 
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
@@ -37,43 +36,31 @@ pub const DEBOUNCE: Duration = Duration::from_millis(15);
 /// After a page switch, how long to wait for the new page's keys before blanking the ones that never came.
 pub const PAGE_TIMEOUT: Duration = Duration::from_millis(300);
 
-/// Brightness while a page is being drawn, and the steps back up afterwards.
-const DIM: u8 = 12;
-const RAMP_STEPS: u8 = 4;
-const RAMP_STEP: Duration = Duration::from_millis(25);
-
-
 /// Hash of the black image used for cleared keys.
 const BLACK: u64 = 0;
 
 /// Grid of OpenDeck positions: 3 rows of 6, the side keys being the last column.
 const COLUMNS: i32 = 6;
 
-/// Key order of the `snake` animation (OpenDeck positions).
+/// Key order of the `snake` animation (OpenDeck positions); `rsnake` runs it backwards.
 const SNAKE: [u8; 15] = [0, 6, 12, 13, 7, 1, 2, 8, 14, 3, 9, 15, 16, 10, 4];
 
 #[derive(Default)]
 pub struct DeviceState {
     /// What each key (OpenDeck position) shows on the hardware, as a hash of the image OpenDeck sent.
     shown: HashMap<u8, u64>,
-    /// The last key pressed and when: where `rings` and `sweep` start.
+    /// The last key pressed and when, to tell what a page switch was.
     press: Option<(Instant, u8)>,
     /// Keys a page switch is still waiting for, and when the switch began.
     page: Option<(Instant, HashSet<u8>)>,
     /// Counts page switches, so a background batch can notice one started and step aside.
     switches: u64,
-    /// The screen is dimmed for a page switch.
-    dimmed: bool,
-    /// Brightness OpenDeck asked for.
-    brightness: Option<u8>,
     /// JPEGs waiting to be sent, by OpenDeck position.
     pending: HashMap<u8, Vec<u8>>,
-    /// The kind of the page switch in progress and the key it started from, for its animation.
-    transition: Option<(Kind, Option<u8>)>,
-    /// Folder keys opened and not yet closed, innermost last.
-    folders: Vec<u8>,
-    /// A folder is opening: its content keys go dark first, then the folder draws.
-    vanish: bool,
+    /// The kind of the page switch whose images are coming in.
+    transition: Option<Kind>,
+    /// How many folders are open: the nav key closes one while there are any.
+    folders: usize,
 }
 
 /// What a page switch is: the nav key on a page (`page`), another key that switched pages
@@ -85,16 +72,6 @@ pub enum Kind {
     Close,
 }
 
-impl Kind {
-    fn name(self) -> &'static str {
-        match self {
-            Kind::Page => "page",
-            Kind::Open => "open",
-            Kind::Close => "close",
-        }
-    }
-}
-
 pub static STATE: LazyLock<Mutex<HashMap<String, DeviceState>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -102,102 +79,65 @@ pub static STATE: LazyLock<Mutex<HashMap<String, DeviceState>>> =
 /// would be read as image data.
 pub static WIRE: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
-pub struct Look {
-    pub order: String,
-    pub dim: bool,
-    /// Darken all content keys in one wave before drawing (only for a folder opening).
-    pub vanish: bool,
-    /// Send a refresh (STP, ~40 ms) after every wave. The GK150K holds uploaded images until a
-    /// refresh, so without one per wave the page appears all at once at the end (~240 ms sooner).
-    pub refresh: bool,
-}
-
-/// `~/Library/Application Support/opendeck/akp153-animation`, read on every use so changes apply on
-/// the next page switch. One line per setting:
+/// `~/Library/Application Support/opendeck/akp153-animation`, read on every page switch so a change
+/// applies to the next one:
 ///
 /// ```text
-/// page  wave       # the nav key switching pages
-/// open  rsnake     # a key that opened another page: a folder; it closes with the mirror of this
+/// page  wave       # the nav key switching pages: classic, wave or snake
+/// open  rsnake     # a key that opened another page (a folder); it closes with this backwards
 /// nav   16         # the nav key; without it every switch is a `page`
 /// ```
 ///
-/// A file of a single line without these names (the old format, e.g. `wave`) sets the page look.
-fn config() -> HashMap<String, Vec<String>> {
+/// A file of a single line without these names (the old format, e.g. `wave`) sets the page animation.
+fn config() -> HashMap<String, String> {
     let text = std::env::var_os("HOME")
         .map(|home| {
             std::path::Path::new(&home).join("Library/Application Support/opendeck/akp153-animation")
         })
         .and_then(|path| std::fs::read_to_string(path).ok())
         .unwrap_or_default();
-    let names = ["page", "open", "nav"];
-    let mut config: HashMap<String, Vec<String>> = HashMap::new();
+    let mut config = HashMap::new();
     for line in text.lines() {
-        let line = line.split('#').next().unwrap_or("");
-        let mut words = line.split_whitespace().map(str::to_string);
-        let Some(first) = words.next() else { continue };
-        if names.contains(&first.as_str()) {
-            config.insert(first, words.collect());
-        } else {
-            // old format: the page look
-            config.insert("page".to_string(), std::iter::once(first).chain(words).collect());
+        let mut words = line.split('#').next().unwrap_or("").split_whitespace();
+        match (words.next(), words.next()) {
+            (Some(name @ ("page" | "open" | "nav")), Some(value)) => {
+                config.insert(name.to_string(), value.to_string());
+            }
+            (Some(value), _) => {
+                config.insert("page".to_string(), value.to_string()); // old format
+            }
+            _ => {}
         }
     }
     config
 }
 
-/// Friendlier names: `wave` is the diagonal, `classic` is everything at once like upstream.
-fn alias(w: &str) -> &str {
-    match w {
-        "wave" => "diagonal",
-        "classic" => "batch",
-        other => other,
-    }
-}
-
-pub fn look(kind: Kind) -> Look {
+/// The animation for a kind of page switch. A folder closes with its opening played backwards.
+fn animation(kind: Kind) -> &'static str {
     let config = config();
-    // A folder closes with its opening played backwards, so it needs no setting of its own.
-    let source = if kind == Kind::Close { "open" } else { kind.name() };
-    let words: Vec<&str> = config
-        .get(source)
-        .map(|w| w.iter().map(String::as_str).collect())
-        .unwrap_or_default();
-    let default = if kind == Kind::Page { "wave" } else { "rsnake" };
-    let mut order = words
-        .iter()
-        .map(|w| alias(w))
-        .find(|w| ORDERS.contains(w))
-        .unwrap_or(alias(default));
-    if kind == Kind::Close {
-        order = mirror(order);
-    }
-    Look {
-        order: order.to_string(),
-        dim: words.contains(&"dim"),
-        vanish: kind == Kind::Open && words.contains(&"vanish"),
-        refresh: !words.contains(&"once"),
-    }
-}
-
-const ORDERS: [&str; 12] = [
-    "diagonal", "rwave", "snake", "rsnake", "bloom", "fold", "bands", "rings", "sweep", "rows", "keys", "batch",
-];
-
-/// The same animation played backwards.
-fn mirror(order: &str) -> &str {
-    match order {
-        "snake" => "rsnake",
-        "rsnake" => "snake",
-        "diagonal" => "rwave",
-        "rwave" => "diagonal",
-        "bloom" => "fold",
-        "fold" => "bloom",
-        other => other,
+    let name = |key: &str, default| match config.get(key).map(String::as_str) {
+        Some("classic" | "batch") => "classic",
+        Some("wave" | "diagonal") => "wave",
+        Some("rwave") => "rwave",
+        Some("snake") => "snake",
+        Some("rsnake") => "rsnake",
+        _ => default,
+    };
+    match kind {
+        Kind::Page => name("page", "wave"),
+        Kind::Open => name("open", "rsnake"),
+        Kind::Close => match name("open", "rsnake") {
+            "snake" => "rsnake",
+            "rsnake" => "snake",
+            "wave" => "rwave",
+            "rwave" => "wave",
+            other => other,
+        },
     }
 }
 
 fn nav_key() -> Option<u8> {
-    config().get("nav")?.first()?.parse().ok()
+    config().get("nav")?.parse().ok()
 }
 
 pub fn hash(bytes: &[u8]) -> u64 {
@@ -237,8 +177,9 @@ pub async fn enqueue(id: &str, position: u8, jpeg: Vec<u8>) {
     states.entry(id.to_string()).or_default().pending.insert(position, jpeg);
 }
 
-/// OpenDeck cleared the whole screen: a page switch. Start waiting for all `keys` positions.
-pub async fn page_switch(id: &str, keys: usize) -> bool {
+/// OpenDeck cleared the whole screen: a page switch. Tell its kind from the key pressed just before
+/// and start waiting for all `keys` positions.
+pub async fn page_switch(id: &str, keys: usize) {
     let nav = nav_key();
     let mut states = STATE.lock().await;
     let state = states.entry(id.to_string()).or_default();
@@ -248,59 +189,28 @@ pub async fn page_switch(id: &str, keys: usize) -> bool {
         .press
         .filter(|(at, _)| at.elapsed() < Duration::from_secs(2))
         .map(|(_, p)| p);
-    let transition = match (press, nav) {
-        (Some(p), Some(n)) if p == n => match state.folders.pop() {
-            Some(folder) => (Kind::Close, Some(folder)), // fold back into the folder key
-            None => (Kind::Page, Some(p)),
-        },
-        (Some(p), Some(_)) => {
-            state.folders.push(p);
-            (Kind::Open, Some(p))
+    let kind = match (press, nav) {
+        (Some(p), Some(n)) if p == n && state.folders > 0 => {
+            state.folders -= 1;
+            Kind::Close
         }
-        (p, _) => (Kind::Page, p),
+        (Some(p), Some(n)) if p != n => {
+            state.folders += 1;
+            Kind::Open
+        }
+        _ => Kind::Page,
     };
-    log::info!("Page switch: {:?} from key {:?}", transition.0, transition.1);
-    state.transition = Some(transition);
-    if transition.0 == Kind::Open && look(Kind::Open).vanish {
-        // Content keys go dark before the folder draws, so every one of them has to be sent again;
-        // the controller and the side screen stay as they are.
-        state.shown.retain(|p, _| chrome(*p, nav));
-        state.vanish = true;
-    }
-    let dim = !state.dimmed && look(transition.0).dim;
-    state.dimmed |= dim;
-    dim
+    log::info!("Page switch: {:?}", kind);
+    state.transition = Some(kind);
 }
 
 pub async fn switches(id: &str) -> u64 {
     STATE.lock().await.get(id).map(|s| s.switches).unwrap_or(0)
 }
 
-/// After a page is in: whether the screen was dimmed for it, and the brightness to go back to.
-pub async fn undim(id: &str) -> Option<u8> {
-    let mut states = STATE.lock().await;
-    let state = states.get_mut(id)?;
-    if !state.dimmed || state.page.is_some() || !state.pending.is_empty() {
-        return None;
-    }
-    state.dimmed = false;
-    Some(state.brightness.unwrap_or(50))
-}
-
-pub async fn set_brightness(id: &str, percent: u8) {
-    STATE.lock().await.entry(id.to_string()).or_default().brightness = Some(percent);
-}
-
-/// Whether the screen is dimmed for a page switch, so OpenDeck's brightness waits for the ramp.
-pub async fn dimmed(id: &str) -> bool {
-    STATE.lock().await.get(id).is_some_and(|s| s.dimmed)
-}
-
 /// The hardware was cleared for real (e.g. on connect): nothing is known to be shown.
 pub async fn forget(id: &str) {
-    let mut states = STATE.lock().await;
-    let brightness = states.get(id).and_then(|s| s.brightness);
-    states.insert(id.to_string(), DeviceState { brightness, ..Default::default() });
+    STATE.lock().await.remove(id);
 }
 
 /// Before a flush: whether a page switch is still waiting for keys (and for how much longer),
@@ -342,127 +252,54 @@ pub async fn page_wait(id: &str) -> PageWait {
     PageWait::Blank(missing)
 }
 
-/// The images to send in waves (each shown as soon as it is in), and whether to refresh after every wave.
-pub struct Batch {
-    pub waves: Vec<Vec<(u8, Vec<u8>)>>,
-    pub refresh_each: bool,
-}
-
-/// The deck's fixed layers, which page switches never blank or animate: the controller (the nav key:
-/// pages on a desktop, back in a folder) and the side screen (the last column). The rest is content.
-pub fn chrome(position: u8, nav: Option<u8>) -> bool {
+/// The deck's fixed layers, which page switches never animate: the controller (the nav key: pages on
+/// a desktop, back in a folder) and the side screen (the last column). The rest is content.
+fn chrome(position: u8, nav: Option<u8>) -> bool {
     Some(position) == nav || position as i32 % COLUMNS == COLUMNS - 1
 }
 
-/// A page switch is animated by its kind's look; other updates go out as one wave.
-///
-/// A folder opening first turns every content key dark in one wave (`dark` is a black key image),
-/// leaving the controller and the side screen lit; its empty tiles (an image shared by three or more
-/// keys) are drawn straight away in that wave, since they are the dark state. Then the folder's
-/// own keys appear in the chosen order.
-pub async fn take_waves(id: &str, dark: &[u8]) -> Batch {
+/// Takes the queued images in waves, each shown as soon as it is in. After a page switch the
+/// controller and the side screen go first, then the content in the order of the switch's
+/// animation, each key straight to its final image. Other updates go out as one wave.
+pub async fn take_waves(id: &str) -> Vec<Vec<(u8, Vec<u8>)>> {
     let nav = nav_key();
     let mut states = STATE.lock().await;
     let Some(state) = states.get_mut(id) else {
-        return Batch { waves: vec![], refresh_each: true };
+        return vec![];
     };
     let images: Vec<(u8, Vec<u8>)> = state.pending.drain().collect();
-    let one = |images: Vec<(u8, Vec<u8>)>| if images.is_empty() { vec![] } else { vec![images] };
-    let Some((kind, origin)) = state.transition.take() else {
-        return Batch { waves: one(images), refresh_each: true };
-    };
-    let look = look(kind);
-    let order = look.order;
-    // Keys that share one image with several others are the page's backdrop (empty tiles).
-    let mut copies: HashMap<u64, usize> = HashMap::new();
-    for (_, jpeg) in &images {
-        *copies.entry(hash(jpeg)).or_default() += 1;
-    }
-    let backdrop: HashSet<u8> = images
-        .iter()
-        .filter(|(_, jpeg)| copies[&hash(jpeg)] >= 3)
-        .map(|(p, _)| *p)
-        .collect();
-    if std::mem::take(&mut state.vanish) {
-        let mut dark_wave = vec![];
-        let mut content = vec![];
-        for (p, jpeg) in images {
-            if chrome(p, nav) || backdrop.contains(&p) {
-                dark_wave.push((p, jpeg));
-            } else {
-                dark_wave.push((p, dark.to_vec()));
-                content.push((p, jpeg));
-            }
-        }
-        let mut waves = one(dark_wave);
-        waves.extend(place_waves(content, &order, origin, &HashSet::new()));
-        return Batch { waves, refresh_each: true }; // the dark wave must show before the folder
-    }
-    if images.len() <= 3 {
-        return Batch { waves: one(images), refresh_each: look.refresh };
-    }
-    // The controller and the side screen change at once; only content animates.
-    let (fixed, content): (Vec<_>, Vec<_>) = images.into_iter().partition(|(p, _)| chrome(*p, nav));
-    let mut waves = one(fixed);
-    waves.extend(place_waves(content, &order, origin, &backdrop));
-    Batch {
-        waves,
-        refresh_each: look.refresh,
-    }
-}
-
-/// Sorts images into waves for an animation `order` around the key `origin`.
-fn place_waves(
-    mut images: Vec<(u8, Vec<u8>)>,
-    order: &str,
-    origin: Option<u8>,
-    backdrop: &HashSet<u8>,
-) -> Vec<Vec<(u8, Vec<u8>)>> {
     if images.is_empty() {
         return vec![];
     }
-    if order == "batch" {
+    let Some(kind) = state.transition.take() else {
         return vec![images];
+    };
+    let (fixed, mut content): (Vec<_>, Vec<_>) = images.into_iter().partition(|(p, _)| chrome(*p, nav));
+    let mut waves: Vec<Vec<(u8, Vec<u8>)>> = if fixed.is_empty() { vec![] } else { vec![fixed] };
+    let order = animation(kind);
+    if order == "classic" {
+        if !content.is_empty() {
+            waves.push(content);
+        }
+        return waves;
     }
-    let origin = origin.map(|p| p as i32).unwrap_or(0);
-    let (or, oc) = (origin / COLUMNS, origin % COLUMNS);
-    // (wave number, order inside it)
-    let place = |p: u8| -> (i32, i32) {
+    // Wave number of each key.
+    let wave = |p: u8| -> i32 {
         let (r, c) = (p as i32 / COLUMNS, p as i32 % COLUMNS);
-        let ring = (r - or).abs().max((c - oc).abs());
+        let snake = || SNAKE.iter().position(|&k| k == p).map_or(100, |i| i as i32);
         match order {
-            "rings" => (ring, p as i32),
-            // bloom: the backdrop at once, then the folder's keys in rings out of the pressed key
-            "bloom" if backdrop.contains(&p) => (0, p as i32),
-            "bloom" => (1 + ring, p as i32),
-            // fold: rings closing in on the folder key, which lights up last
-            "fold" => (COLUMNS - ring, p as i32),
-            "sweep" => ((c - oc).abs(), r),
-            "rows" => (r, c),
-            "keys" => (p as i32, 0),
-            // bands: the diagonal in three waves, ~160 ms faster since every wave costs a refresh
-            "bands" => ((r + c) * 3 / (COLUMNS + 2), r + c),
-            // snake: one key at a time down and up the columns, in this order; the side column last
-            "snake" => (
-                SNAKE.iter().position(|&k| k == p).map_or(100 + p as i32, |i| i as i32),
-                0,
-            ),
-            // rsnake: the snake backwards, from the far end; each key goes straight to its final image
-            "rsnake" => (
-                SNAKE.iter().rev().position(|&k| k == p).map_or(100 + p as i32, |i| i as i32),
-                0,
-            ),
-            "rwave" => (COLUMNS + 1 - (r + c), -r), // the diagonal backwards, from the bottom right
-            _ => (r + c, r), // diagonal: left to right and top to bottom at once
+            "snake" => snake(),
+            "rsnake" => SNAKE.len() as i32 - snake(),
+            "rwave" => COLUMNS + 1 - (r + c), // the diagonal backwards, from the bottom right
+            _ => r + c,                        // wave: the diagonal from the top left
         }
     };
-    images.sort_by_key(|(p, _)| place(*p));
-    let mut waves: Vec<Vec<(u8, Vec<u8>)>> = vec![];
+    content.sort_by_key(|(p, _)| (wave(*p), *p));
     let mut last = i32::MIN;
-    for (p, jpeg) in images {
-        if place(p).0 != last {
+    for (p, jpeg) in content {
+        if wave(p) != last {
             waves.push(vec![]);
-            last = place(p).0;
+            last = wave(p);
         }
         waves.last_mut().unwrap().push((p, jpeg));
     }
@@ -507,30 +344,6 @@ pub async fn send_image(
 pub async fn refresh(device: &Device) -> Result<(), MirajazzError> {
     let mut stp = vec![0x00, 0x43, 0x52, 0x54, 0x00, 0x00, 0x53, 0x54, 0x50];
     device.write_extended_data(&mut stp).await
-}
-
-/// Brightness straight away, without waiting for a page. The caller holds [WIRE].
-pub async fn brightness(device: &Device, percent: u8) -> Result<(), MirajazzError> {
-    device.set_brightness(percent).await
-}
-
-/// Back from the dim level to `target` in a few quick steps.
-pub async fn ramp_up(device: &Device, target: u8) -> Result<(), MirajazzError> {
-    for step in 1..=RAMP_STEPS {
-        let level = DIM as u32 + (target.saturating_sub(DIM) as u32 * step as u32) / RAMP_STEPS as u32;
-        {
-            let _wire = WIRE.lock().await;
-            brightness(device, level as u8).await?;
-        }
-        if step < RAMP_STEPS {
-            tokio::time::sleep(RAMP_STEP).await;
-        }
-    }
-    Ok(())
-}
-
-pub fn dim_level() -> u8 {
-    DIM
 }
 
 pub fn black_hash() -> u64 {

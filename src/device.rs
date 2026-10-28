@@ -304,12 +304,8 @@ pub async fn handle_set_image(
         }
         (None, None) => {
             // OpenDeck clears the whole screen before drawing a new page. Keep the old page up instead;
-            // the flush task waits for the new page's keys and swaps them in at once.
-            // Dimming answers the press at once and hides the keys changing one wave at a time.
-            if fast::page_switch(id, KEY_COUNT).await {
-                let _wire = fast::WIRE.lock().await;
-                fast::brightness(device, fast::dim_level()).await?;
-            }
+            // the flush task waits for the new page's keys and draws them over it.
+            fast::page_switch(id, KEY_COUNT).await;
             notify_flush(id).await;
         }
         _ => {}
@@ -343,12 +339,8 @@ async fn send_waves(device: &Device, id: &str) -> Result<(), MirajazzError> {
     let packet_size = if kind.protocol_version() >= 2 { 1024 } else { 512 };
     let started = std::time::Instant::now();
     let switches = fast::switches(id).await;
-    let format = get_image_format_for_key(&kind, 0);
-    let dark = fast::convert(format, fast::black(&format)).unwrap_or_default();
-    let batch = fast::take_waves(id, &dark).await;
     let (mut images, mut bytes, mut shown_waves) = (0, 0, 0);
-    let refresh_each = batch.refresh_each;
-    let mut waves = batch.waves.into_iter().peekable();
+    let mut waves = fast::take_waves(id).await.into_iter();
     while let Some(wave) = waves.next() {
         let mut wave = wave.into_iter();
         while let Some((position, jpeg)) = wave.next() {
@@ -368,10 +360,8 @@ async fn send_waves(device: &Device, id: &str) -> Result<(), MirajazzError> {
             bytes += jpeg.len();
         }
         shown_waves += 1;
-        if refresh_each || waves.peek().is_none() {
-            let _wire = fast::WIRE.lock().await;
-            fast::refresh(device).await?;
-        }
+        let _wire = fast::WIRE.lock().await;
+        fast::refresh(device).await?;
     }
     device.flush().await?; // images of BMP-mode devices still go through mirajazz's cache
     if images > 0 {
@@ -382,9 +372,6 @@ async fn send_waves(device: &Device, id: &str) -> Result<(), MirajazzError> {
             shown_waves,
             started.elapsed().as_millis()
         );
-    }
-    if let Some(target) = fast::undim(id).await {
-        fast::ramp_up(device, target).await?;
     }
     Ok(())
 }

@@ -46,7 +46,7 @@ Everything lives in `src/fast.rs`, with hooks in `src/device.rs` and `src/main.r
 |---|---|---|
 | Image OpenDeck sends again unchanged | Re-encoded and re-sent | Skipped, because the key already shows it |
 | Whole-screen clear on page switch | Sent at once, so the screen goes black | Ignored. The new page draws over the old one |
-| Page drawing | One refresh at the end | In waves, a refresh after each, with separate animations for pages, opening folders and closing them |
+| Page drawing | One refresh at the end | In waves, a refresh after each. Pages and folders have separate animations, and a folder closes with its opening played backwards |
 | Background updates during a page switch | Queued ahead of the page | The page takes over, and the rest wait behind it |
 | Single-key clear | Its own command, ~40 ms each | A black image that joins the batch |
 | Flush debounce | 50 ms | 15 ms. A page switch flushes as soon as all its keys are in, or after at most 300 ms |
@@ -61,7 +61,7 @@ Each kind of page switch has its own animation:
 |---|---|---|
 | `page` | The nav key switches pages | Set by `page`. Default `wave` |
 | `open` | Any other key switched pages: a folder opens | Set by `open`. Default `rsnake` |
-| `close` | The nav key is pressed inside a folder (a back key) | Always the opening played backwards: `rsnake` → `snake`, `wave` → `rwave`, `bloom` → `fold`. `classic` stays `classic` |
+| `close` | The nav key is pressed inside a folder (a back key) | Always the opening played backwards: `rsnake` → `snake`, `wave` → `rwave`. `classic` stays `classic` |
 
 The driver treats the deck as three layers:
 
@@ -71,7 +71,7 @@ The driver treats the deck as three layers:
 
 Controller and side screen are never blanked or animated. A key there is redrawn only when its image changes, so it stays lit through every switch. Only content keys animate. A folder opens in one pass over the content: each key goes straight to its final image, either the folder's key or a dark tile where the folder is empty.
 
-The driver knows which key was pressed, so it tells the switch kinds apart by itself. It also keeps a stack of open folders, so nested folders close back in order. Any key that switches pages counts as a folder, with nothing to set per folder.
+The driver knows which key was pressed, so it tells the switch kinds apart by itself. It also counts open folders, so nested folders close back one level at a time. Any key that switches pages counts as a folder, with nothing to set per folder.
 
 Settings live in `~/Library/Application Support/opendeck/akp153-animation`. The file is read on every switch, so a change applies to the next one:
 
@@ -85,28 +85,11 @@ A file with a single line in the old format, e.g. `wave`, sets the page animatio
 
 | Animation | How the page appears | Time on the GK150K |
 |---|---|---|
-| `classic` (`batch`) | Everything at once, like upstream but without the black screen | ~0.55 s |
-| `wave` (`diagonal`) | One diagonal at a time, top-left to bottom-right | ~0.7 s |
+| `classic` | Everything at once, like upstream but without the black screen | ~0.55 s |
+| `wave` | One diagonal at a time, top-left to bottom-right | ~0.7 s |
+| `rwave` | The diagonal backwards, from the bottom right | ~0.7 s |
 | `snake` | One key at a time down and up the columns: 0, 6, 12, 13, 7, 1, 2, 8, 14, 3, 9, 15, 16, 10, 4 | ~1.2 s |
 | `rsnake` | The snake backwards. Each key goes straight to its final image, so a half-empty folder looks whole | ~1 s for 14 keys |
-| `rwave` | The diagonal backwards, from the bottom right | ~0.7 s |
-| `bloom` | The folder's backdrop at once, then its keys in rings out of the key that opened it | ~0.2 s for a nearly empty folder |
-| `fold` | Rings closing in on the folder key, which lights up last | |
-| `bands` | The diagonal in three waves | ~0.55 s |
-| `rows` | Top to bottom | |
-| `sweep` | Column by column from the pressed key | |
-| `rings` | Rings around the pressed key | |
-| `keys` | One key at a time, in position order | |
-
-Keys that share one image with at least two others count as the backdrop, such as the empty tiles of a half-filled folder. `bloom` draws the backdrop first.
-
-Words that can follow an animation:
-
-| Word | Effect |
-|---|---|
-| `dim` | Dim the screen to 12% during the switch and ramp it back afterwards |
-| `once` | One refresh at the end instead of one per wave. The page appears all at once, ~240 ms sooner |
-| `vanish` | For `open`: darken every content key in one wave first, then draw the folder. Costs ~0.45 s before anything new shows |
 
 Each wave costs a ~40 ms refresh, so more waves look smoother and take longer.
 
@@ -118,12 +101,13 @@ To change animations from the deck itself, use keys that run a shell command to 
 |---|---|
 | Lower JPEG quality (90 → 75) to send fewer bytes | Almost no effect, because the device's cost is per image, not per byte (442 vs 475 ms for half the bytes). Set to 85 to keep keys sharp |
 | Keep the old page up until the whole new page was in, then show it at once | No black screen, but nothing happened for ~0.55 s after a press, which felt like lag. Replaced by waves |
-| Dim the screen during a switch (`dim`) | Works (~0.5 ms per brightness command), but looked worse than plain waves. Off by default |
-| Folder opening as "darken all content, then draw" (now `vanish`) | The dark phase took ~0.45 s before anything new showed, and in a half-empty folder little was left to animate afterwards. Replaced by `rsnake` |
+| Dim the screen during a switch | Works (~0.5 ms per brightness command), but looked worse than plain waves. Removed |
+| Folder opening as "darken all content, then draw" | The dark phase took ~0.45 s before anything new showed, and in a half-empty folder little was left to animate afterwards. Replaced by `rsnake` |
 | Flash the pressed key (brightened, white frame, ~10 ms) | Gave instant feedback, but the device's firmware already gives its own press feedback, so it only cost an extra image per switch. Removed |
-| Three-band diagonal (`bands`) | ~160 ms faster than `wave`, but the wave looked less smooth |
-| One refresh per page instead of per wave (`once`) | ~240 ms faster, but the device holds images until a refresh, so the wave disappears and the page pops in at once |
+| Three-band diagonal | ~160 ms faster than `wave`, but the wave looked less smooth. Removed |
+| One refresh per page instead of per wave | ~240 ms faster, but the device holds images until a refresh, so the wave disappears and the page pops in at once |
 | "Pincer" animation (top rows left to right, bottom row right to left) | Looked messy. Removed |
+| More orders: `bloom` (backdrop first, then rings out of the folder key), `fold`, `rings`, `sweep`, `rows`, `keys` | Tried for folders and pages. None looked better than the snake and wave pair, so they were removed to keep the driver simple |
 | Start the switch on key down instead of key up | The GK150K sends one input report per press, with the state byte always 0, so there is no separate press and release to act on |
 | Larger HID reports | The report size (512 bytes) is fixed by the device's descriptor |
 | Shorter debounce (50 → 20 → 15 ms) | Kept, but it saves only a few ms. The device time dominates |
