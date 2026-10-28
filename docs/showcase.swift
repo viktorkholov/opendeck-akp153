@@ -15,6 +15,9 @@ import UniformTypeIdentifiers
 
 let out = CommandLine.arguments.dropFirst().first ?? "docs"
 
+/// Part of every GIF's file name: GitHub caches README images by URL, so a new version needs a new name.
+let VERSION = "v2"
+
 /// Pixels per point, so the images stay sharp when the README shows them large.
 let SCALE: CGFloat = 2
 
@@ -221,7 +224,7 @@ struct Scene { let title: String; let from: Page; let to: Page; let timeline: Ti
 func gif(_ name: String, _ steps: [[Scene]]) {
     let rows = steps[0].count
     let size = CGSize(width: deckW + 24, height: CGFloat(rows) * (deckH + 12) + 12)
-    let url = URL(fileURLWithPath: "\(out)/\(name).gif")
+    let url = URL(fileURLWithPath: "\(out)/\(name)-\(VERSION).gif")
     var frames: [CGImage] = []
     var delays: [Double] = []
     for scenes in steps {
@@ -248,7 +251,7 @@ func gif(_ name: String, _ steps: [[Scene]]) {
             kCGImagePropertyGIFDelayTime: delay, kCGImagePropertyGIFUnclampedDelayTime: delay]] as CFDictionary)
     }
     CGImageDestinationFinalize(dest)
-    print("\(name).gif: \(frames.count) frames")
+    print("\(name)-\(VERSION).gif: \(frames.count) frames")
 }
 
 // MARK: the showcase
