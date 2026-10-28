@@ -13,6 +13,24 @@ import UniformTypeIdentifiers
 
 let out = CommandLine.arguments.dropFirst().first ?? "docs"
 
+/// Pixels per point, so the images stay sharp when the README shows them large.
+let SCALE: CGFloat = 2
+
+/// A bitmap `size` points large at SCALE, with drawing set up in points.
+func canvas(_ size: CGSize, _ draw: () -> Void) -> NSBitmapImageRep {
+    let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * SCALE), pixelsHigh: Int(size.height * SCALE),
+                               bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                               colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+    let transform = NSAffineTransform()
+    transform.scale(by: SCALE)
+    transform.concat()
+    draw()
+    NSGraphicsContext.restoreGraphicsState()
+    return rep
+}
+
 // MARK: model
 
 enum Tile: Equatable {
@@ -209,17 +227,13 @@ func gif(_ name: String, _ steps: [[Scene]]) {
         let end = scenes.map { $0.timeline.end }.max()!
         var t = -400.0
         while t <= end + 900 {
-            let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height),
-                                       bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
-                                       colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
-            NSGraphicsContext.saveGraphicsState()
-            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-            hex(0x18181b).setFill(); CGRect(origin: .zero, size: size).fill()
-            for (i, s) in scenes.enumerated() {
-                let y = size.height - CGFloat(i + 1) * (deckH + 12)
-                drawDeck(s.title, from: s.from, to: s.to, timeline: s.timeline, press: s.press, t: t, origin: CGPoint(x: 12, y: y))
+            let rep = canvas(size) {
+                hex(0x18181b).setFill(); CGRect(origin: .zero, size: size).fill()
+                for (i, s) in scenes.enumerated() {
+                    let y = size.height - CGFloat(i + 1) * (deckH + 12)
+                    drawDeck(s.title, from: s.from, to: s.to, timeline: s.timeline, press: s.press, t: t, origin: CGPoint(x: 12, y: y))
+                }
             }
-            NSGraphicsContext.restoreGraphicsState()
             frames.append(rep.cgImage!)
             let step = t < 0 || t > end ? 100.0 : 20.0
             delays.append(step / 1000)
@@ -238,12 +252,10 @@ func gif(_ name: String, _ steps: [[Scene]]) {
 
 // MARK: the showcase
 
-gif("before-after", [[
-    Scene(title: "upstream 0.11.1", from: desktopA, to: desktopB, timeline: upstream(desktopA, desktopB), press: controller),
-    Scene(title: "this fork · wave", from: desktopA, to: desktopB, timeline: fork(desktopA, desktopB, order: "wave"), press: controller),
-]])
+gif("upstream", [[Scene(title: "upstream 0.11.1", from: desktopA, to: desktopB,
+                         timeline: upstream(desktopA, desktopB), press: controller)]])
 for order in ["classic", "wave", "snake"] {
-    gif("page-\(order)", [[Scene(title: "page switch · \(order)", from: desktopA, to: desktopB,
+    gif("page-\(order)", [[Scene(title: "this fork · \(order)", from: desktopA, to: desktopB,
                                  timeline: fork(desktopA, desktopB, order: order), press: controller)]])
 }
 gif("folder", [
@@ -311,38 +323,33 @@ do {
     let s: CGFloat = 0.62
     let w = deckW * s, h = deckH * s, gap: CGFloat = 120
     let size = CGSize(width: 2 * w + gap + 60, height: 2 * h + 150)
-    let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height),
-                               bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
-                               colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
-    NSGraphicsContext.saveGraphicsState()
-    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-    hex(0x18181b).setFill(); CGRect(origin: .zero, size: size).fill()
-    let top = size.height - h - 20, bottom: CGFloat = 70
-    let left: CGFloat = 30, right = left + w + gap
-    still("Desktop 1", desktopA, at: CGPoint(x: left, y: top), scale: s)
-    still("Desktop 2", desktopB, at: CGPoint(x: right, y: top), scale: s)
-    still("Folder (in a key of Desktop 1)", folder, at: CGPoint(x: left, y: bottom), scale: s)
-    still("Layers", desktopA, at: CGPoint(x: right, y: bottom), scale: s)
-    layers(at: CGPoint(x: right, y: bottom), scale: s)
-    let midY = top + (deckH - HEADER) * s / 2
-    arrow(from: CGPoint(x: left + w + 12, y: midY), to: CGPoint(x: right - 12, y: midY), "pages",
-          labelAt: CGPoint(x: left + w + gap / 2 - 18, y: midY + 8), both: true)
-    let folderKey = keyRect(3, origin: .zero)
-    let fx = left + folderKey.midX * s
-    arrow(from: CGPoint(x: fx, y: top - 6), to: CGPoint(x: fx, y: bottom + h + 4), "open", labelAt: CGPoint(x: fx + 8, y: top - 48))
-    let backKey = keyRect(controller, origin: .zero)
-    let bx = left + backKey.midX * s
-    arrow(from: CGPoint(x: bx, y: bottom + h + 4), to: CGPoint(x: bx, y: top - 6), "back", labelAt: CGPoint(x: bx + 8, y: top - 48))
-    let legend = [("controller: pages / back", hex(0xfb923c)), ("side screen", hex(0x4ade80)), ("content", hex(0x60a5fa))]
-    let widths = legend.map { 17 + NSAttributedString(string: $0.0, attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold)]).size().width + 16 }
-    var x = right + w - widths.reduce(0, +) + 16 // right-aligned under the Layers deck
-    for (name, colour) in legend {
-        let y: CGFloat = 30
-        colour.setFill(); NSBezierPath(roundedRect: CGRect(x: x, y: y + 3, width: 12, height: 12), xRadius: 3, yRadius: 3).fill()
-        text(name, 12, hex(0xffffff, 0.8), at: CGPoint(x: x + 17, y: y))
-        x += 17 + NSAttributedString(string: name, attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold)]).size().width + 16
+    let rep = canvas(size) {
+        hex(0x18181b).setFill(); CGRect(origin: .zero, size: size).fill()
+        let top = size.height - h - 20, bottom: CGFloat = 70
+        let left: CGFloat = 30, right = left + w + gap
+        still("Desktop 1", desktopA, at: CGPoint(x: left, y: top), scale: s)
+        still("Desktop 2", desktopB, at: CGPoint(x: right, y: top), scale: s)
+        still("Folder (in a key of Desktop 1)", folder, at: CGPoint(x: left, y: bottom), scale: s)
+        still("Layers", desktopA, at: CGPoint(x: right, y: bottom), scale: s)
+        layers(at: CGPoint(x: right, y: bottom), scale: s)
+        let midY = top + (deckH - HEADER) * s / 2
+        arrow(from: CGPoint(x: left + w + 12, y: midY), to: CGPoint(x: right - 12, y: midY), "pages",
+              labelAt: CGPoint(x: left + w + gap / 2 - 18, y: midY + 8), both: true)
+        let fx = left + keyRect(3, origin: .zero).midX * s
+        arrow(from: CGPoint(x: fx, y: top - 6), to: CGPoint(x: fx, y: bottom + h + 4), "open", labelAt: CGPoint(x: fx + 8, y: top - 48))
+        let bx = left + keyRect(controller, origin: .zero).midX * s
+        arrow(from: CGPoint(x: bx, y: bottom + h + 4), to: CGPoint(x: bx, y: top - 6), "back", labelAt: CGPoint(x: bx + 8, y: top - 48))
+        let legend = [("controller: pages / back", hex(0xfb923c)), ("side screen", hex(0x4ade80)), ("content", hex(0x60a5fa))]
+        let width = { (name: String) in
+            17 + NSAttributedString(string: name, attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold)]).size().width + 16
+        }
+        var x = right + w - legend.map { width($0.0) }.reduce(0, +) + 16 // right-aligned under the Layers deck
+        for (name, colour) in legend {
+            colour.setFill(); NSBezierPath(roundedRect: CGRect(x: x, y: 33, width: 12, height: 12), xRadius: 3, yRadius: 3).fill()
+            text(name, 12, hex(0xffffff, 0.8), at: CGPoint(x: x + 17, y: 30))
+            x += width(name)
+        }
     }
-    NSGraphicsContext.restoreGraphicsState()
     try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "\(out)/structure.png"))
     print("structure.png")
 }

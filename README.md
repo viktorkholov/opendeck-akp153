@@ -8,60 +8,67 @@ An unofficial plugin for Mirabox HSV293S-family devices
 >
 > The changes were written with an AI coding assistant (Claude) and reviewed by the fork's owner.
 
-## Showcase
+<h1 align="center">SHOWCASE</h1>
 
-These GIFs are simulations of a 3×6 deck, timed with what was measured on a Maddog GK150K. They are not screen recordings. `docs/showcase.swift` renders them, and the tiles are neutral numbered demos.
+<p align="center">These GIFs are simulations of a 3×6 deck, timed with what was measured on a Maddog GK150K. They are not screen recordings. <code>docs/showcase.swift</code> renders them, and the tiles are neutral numbered demos.</p>
 
-**Before and after: a page switch**
+## Before: upstream 0.11.1
 
-![Upstream goes black for ~0.7 s; this fork draws the new page in a diagonal wave over the old one](docs/before-after.gif)
+<p align="center"><img src="docs/upstream.gif" width="100%" alt="Upstream: the screen goes black right after the press and the new page appears all at once after ~0.73 s"></p>
 
-Upstream clears the screen and keeps it black until the whole page has been sent. This fork never clears it. It skips keys that already show the right image (`pages` and the side screen here) and draws the rest wave by wave.
+When you press a page key, the whole screen goes black at once. It stays black until every key of the new page has been sent, about **0.73 s** on a full page. On a page with empty keys it takes up to **~1.2 s**, because each empty key is cleared with its own ~40 ms command first. Then the page appears all at once.
 
-**Page animations**
+## This fork: `snake`
 
-| `classic` | `wave` | `snake` |
-|---|---|---|
-| ![classic](docs/page-classic.gif) | ![wave](docs/page-wave.gif) | ![snake](docs/page-snake.gif) |
-| Everything at once, ~0.55 s | Diagonal from the top left, ~0.7 s | Down and up the columns, ~1.2 s |
+<p align="center"><img src="docs/page-snake.gif" width="100%" alt="This fork: nothing goes black; the new page replaces the old one key by key down and up the columns"></p>
 
-**Desktops and folders**
+Nothing goes black. The old page stays, and the new one replaces it key by key, down and up the columns. The first new key shows **~0.16 s** after the press and the whole page by ~1.1–1.2 s. The `pages` key and the side screen are not redrawn, because they look the same on both pages.
 
-![Desktop 1 and Desktop 2 swap with pages; a folder in a key of Desktop 1 opens and returns with back; the layers are controller, side screen and content](docs/structure.png)
+## Or choose `wave` or `classic`
 
-The deck has two kinds of pages:
-
-- **Desktops** sit side by side. The `pages` key moves to the next one, and after the last it wraps to the first.
-- **Folders** live in a key on a desktop, or inside another folder. In a folder the same slot holds `back`, which returns one level up.
-
-On every page the slots split into three layers:
-
-| Layer | Slots |
+| `wave` | `classic` |
 |---|---|
-| Controller | `pages` or `back` |
-| Side screen | the last column |
-| Content | everything else |
+| ![wave](docs/page-wave.gif) | ![classic](docs/page-classic.gif) |
+| A diagonal from the top left. First keys at ~0.16 s, whole page ~0.85 s | Everything at once, but without the black screen. Whole page ~0.6 s |
 
-Only content animates.
+Every wave ends with a ~40 ms refresh, so smoother animations take longer. `classic` is the fastest.
 
-The driver needs only the nav key's slot (`nav 16`) to tell the switches apart. A press on it is a page switch, or closes a folder when one is open. A press on any other key that changes the page opens a folder. Desktops and folders themselves are ordinary OpenDeck profiles with Switch Profile keys, and the deck's layout generator writes them.
+## Desktops and folders
 
-![A tour: Desktop 1 to Desktop 2 and back with pages, then a folder opens and closes](docs/tour.gif)
+The driver now knows two kinds of pages, and each has its own animation.
 
-**Folders: open with `rsnake`, close with the mirror**
+<p align="center"><img src="docs/structure.png" width="100%" alt="Desktop 1 and Desktop 2 swap with pages; a folder in a key of Desktop 1 opens and returns with back; the layers are controller, side screen and content"></p>
 
-![A folder opens as a reverse snake, each key straight to its final image; back closes it with a snake](docs/folder.gif)
+- **Desktops** sit side by side. The `pages` key moves to the next one and wraps around after the last. They animate with the page animation: `classic`, `wave` or `snake`.
+- **Folders** live in a key on a desktop, or inside another folder. In a folder the same slot holds `back`, which goes up one level. A folder **opens with a reverse snake and closes with a snake**, the same move played backwards.
 
-The back key and the side screen stay lit. Each content key goes straight to its final image: the folder's key, or a dark tile where the folder is empty.
+On every page the slots split into three layers. Only content animates:
 
-## Results on a Maddog GK150K
-
-| | Upstream 0.11.1 | This branch |
+| Layer | Slots | On a switch |
 |---|---|---|
-| Black screen on a page switch | ~0.6–0.8 s | **None**: the old page stays until the new one draws over it |
-| Whole page on screen | ~0.8 s, all at once after the dark | `classic` ~0.55 s, `wave` ~0.7 s, `snake` ~1.2 s |
-| Keys that look the same on both pages | Redrawn on every switch | Skipped, ~30 ms saved per key |
+| Controller | the nav key: `pages` on a desktop, `back` in a folder | Changes at once, never goes dark |
+| Side screen | the last column | Stays lit, and is redrawn only if it changes |
+| Content | everything else | Animates. Each key goes straight to its final image; empty ones become dark tiles |
+
+<p align="center"><img src="docs/folder.gif" width="100%" alt="A folder opens as a reverse snake and closes with back as a snake"></p>
+
+The driver needs only the nav key's slot (`nav 16`) to tell switches apart. A press on it switches desktops, or closes a folder when one is open. A press on any other key that changes the page opens a folder. Desktops and folders are ordinary OpenDeck profiles with Switch Profile keys.
+
+<p align="center"><img src="docs/tour.gif" width="100%" alt="A tour: Desktop 1 to Desktop 2 and back with pages, then a folder opens and closes"></p>
+
+## Upstream vs this fork
+
+| | Upstream 0.11.1 | This fork |
+|---|---|---|
+| Right after a press | The whole screen goes black | Nothing goes dark; the old page stays |
+| First new key on screen | ~0.73 s (up to ~1.2 s with empty keys) | **~0.16 s** |
+| Whole page on screen | ~0.73 s (up to ~1.2 s), all at once | `classic` ~0.6 s · `wave` ~0.85 s · `snake` ~1.2 s |
+| Keys that look the same on both pages | Redrawn on every switch | Skipped, saving ~30 ms each |
+| Empty keys | Cleared one by one, ~40 ms each | A dark image in the same batch |
+| Desktops and folders | Every switch looks the same | Desktops use the page animation. Folders open with `rsnake` and close with `snake` |
+| Nav key and side screen | Go black with everything else | Stay lit through every switch |
 | Background key updates during a switch | Sent ahead of the page | Wait behind the page |
+| Log | `Flushing pending updates` | `Flushed N images, B bytes in W waves, T ms` |
 
 ## Why page switches were slow
 
@@ -131,11 +138,11 @@ A file with a single line in the old format, e.g. `wave`, sets the page animatio
 
 | Animation | How the page appears | Time on the GK150K |
 |---|---|---|
-| `classic` | Everything at once, like upstream but without the black screen | ~0.55 s |
-| `wave` | One diagonal at a time, top-left to bottom-right | ~0.7 s |
-| `rwave` | The diagonal backwards, from the bottom right | ~0.7 s |
+| `classic` | Everything at once, like upstream but without the black screen | ~0.6 s |
+| `wave` | One diagonal at a time, top-left to bottom-right | ~0.85 s |
+| `rwave` | The diagonal backwards, from the bottom right | ~0.85 s |
 | `snake` | One key at a time down and up the columns: 0, 6, 12, 13, 7, 1, 2, 8, 14, 3, 9, 15, 16, 10, 4 | ~1.2 s |
-| `rsnake` | The snake backwards. Each key goes straight to its final image, so a half-empty folder looks whole | ~1 s for 14 keys |
+| `rsnake` | The snake backwards. Each key goes straight to its final image, so a half-empty folder looks whole | ~1.1 s for 14 keys |
 
 Each wave costs a ~40 ms refresh, so more waves look smoother and take longer.
 
