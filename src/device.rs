@@ -175,16 +175,7 @@ async fn device_flush_task(id: &String, notify: Arc<Notify>, token: Cancellation
         let flush_result = {
             let guard = DEVICES.read().await;
             if let Some(device) = guard.get(id) {
-                let (images, bytes) = fast::take_queued(id).await;
-                let started = std::time::Instant::now();
-                let result = device.flush().await;
-                log::info!(
-                    "Flushed {} images, {} bytes in {} ms",
-                    images,
-                    bytes,
-                    started.elapsed().as_millis()
-                );
-                result
+                send_waves(device, id).await
             } else {
                 Ok(())
             }
@@ -232,7 +223,10 @@ async fn device_events_task(candidate: &CandidateDevice) -> Result<(), MirajazzE
 
             if let Some(outbound) = OUTBOUND_EVENT_MANAGER.lock().await.as_mut() {
                 match update {
-                    DeviceStateUpdate::ButtonDown(key) => outbound.key_down(id, key).await.unwrap(),
+                    DeviceStateUpdate::ButtonDown(key) => {
+                        fast::pressed(&id, key).await;
+                        outbound.key_down(id, key).await.unwrap()
+                    }
                     DeviceStateUpdate::ButtonUp(key) => outbound.key_up(id, key).await.unwrap(),
                     DeviceStateUpdate::EncoderDown(encoder) => {
                         outbound.encoder_down(id, encoder).await.unwrap();
@@ -287,11 +281,7 @@ pub async fn handle_set_image(
             let format = get_image_format_for_key(&kind, position);
 
             if matches!(format.mode, ImageMode::JPEG) {
-                let data = fast::convert(format, image)?;
-                fast::queued(id, data.len()).await;
-                device
-                    .write_image(opendeck_to_device(position), &data)
-                    .await?;
+                fast::enqueue(id, position, fast::convert(format, image)?).await;
             } else {
                 device
                     .set_button_image(opendeck_to_device(position), format, image)
@@ -331,9 +321,37 @@ async fn queue_black(device: &Device, id: &str, position: u8) -> Result<(), Mira
     let format = get_image_format_for_key(&kind, position);
     match fast::convert(format, fast::black(&format)) {
         Ok(data) => {
-            fast::queued(id, data.len()).await;
-            device.write_image(opendeck_to_device(position), &data).await
+            fast::enqueue(id, position, data).await;
+            Ok(())
         }
         Err(_) => device.clear_button_image(opendeck_to_device(position)).await,
     }
+}
+
+/// Sends queued images wave by wave, showing each wave as soon as it is in.
+async fn send_waves(device: &Device, id: &str) -> Result<(), MirajazzError> {
+    let kind = Kind::from_vid_pid(device.vid, device.pid).unwrap();
+    let packet_size = if kind.protocol_version() >= 2 { 1024 } else { 512 };
+    let started = std::time::Instant::now();
+    let waves = fast::take_waves(id).await;
+    let (mut images, mut bytes) = (0, 0);
+    for wave in &waves {
+        for (position, jpeg) in wave {
+            fast::send_image(device, packet_size, opendeck_to_device(*position), jpeg).await?;
+            images += 1;
+            bytes += jpeg.len();
+        }
+        fast::refresh(device).await?;
+    }
+    device.flush().await?; // images of BMP-mode devices still go through mirajazz's cache
+    if images > 0 {
+        log::info!(
+            "Flushed {} images, {} bytes in {} waves, {} ms",
+            images,
+            bytes,
+            waves.len(),
+            started.elapsed().as_millis()
+        );
+    }
+    Ok(())
 }
