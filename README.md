@@ -8,6 +8,29 @@ An unofficial plugin for Mirabox HSV293S-family devices
 >
 > The changes were written with an AI coding assistant (Claude) and reviewed by the fork's owner.
 
+## Showcase
+
+These GIFs are simulations of a 3×6 deck, timed with what was measured on a Maddog GK150K. They are not screen recordings. `docs/showcase.swift` renders them, and the tiles are neutral numbered demos.
+
+**Before and after: a page switch**
+
+![Upstream goes black for ~0.7 s; this fork draws the new page in a diagonal wave over the old one](docs/before-after.gif)
+
+Upstream clears the screen and keeps it black until the whole page has been sent. This fork never clears it. It skips keys that already show the right image (`pages` and the side screen here) and draws the rest wave by wave.
+
+**Page animations**
+
+| `classic` | `wave` | `snake` |
+|---|---|---|
+| ![classic](docs/page-classic.gif) | ![wave](docs/page-wave.gif) | ![snake](docs/page-snake.gif) |
+| Everything at once, ~0.55 s | Diagonal from the top left, ~0.7 s | Down and up the columns, ~1.2 s |
+
+**Folders: open with `rsnake`, close with the mirror**
+
+![A folder opens as a reverse snake, each key straight to its final image; back closes it with a snake](docs/folder.gif)
+
+The back key and the side screen stay lit. Each content key goes straight to its final image: the folder's key, or a dark tile where the folder is empty.
+
 ## Results on a Maddog GK150K
 
 | | Upstream 0.11.1 | This branch |
@@ -114,6 +137,10 @@ To change animations from the deck itself, use keys that run a shell command to 
 | Faster cable, hub, USB-C adapter | No effect possible. The device already runs at USB 2.0 high-speed, and commands take 0.5 ms |
 | Firmware update | None published for this device, and the firmware is closed |
 | Preload the next page into the device's buffer, then flip with one refresh | Should make switches ~50–100 ms, but the plugin would need to know the next page in advance (OpenDeck pages would have to be driven by a plugin). Not done, because the waves were preferred |
+
+The folder opening that was dropped, next to the one that was kept:
+
+![Darkening first leaves ~0.55 s with nothing new on screen; rsnake starts changing keys at once](docs/folder-dropped.gif)
 
 ## Install over an existing plugin
 
