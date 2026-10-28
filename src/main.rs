@@ -84,7 +84,12 @@ impl openaction::GlobalEventHandler for GlobalEventHandler {
 
         let id = event.device.clone();
 
+        fast::set_brightness(&id, event.brightness).await;
+        if fast::dimmed(&id).await {
+            return Ok(()); // a page switch is dimming the screen; it ramps back up to this level
+        }
         if let Some(device) = DEVICES.read().await.get(&event.device) {
+            let _wire = fast::WIRE.lock().await;
             device
                 .set_brightness(event.brightness)
                 .await

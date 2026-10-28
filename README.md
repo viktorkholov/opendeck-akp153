@@ -21,18 +21,31 @@ On a page switch, OpenDeck clears the whole screen and then sends all 18 keys. W
 
 ## What this branch changes
 
-All of it lives in `src/fast.rs`, plus a few hooks in `src/device.rs`.
+Measured on the GK150K, the device needs ~30 ms per key image whatever its size (15 images of 15 KB took 442 ms, of 30 KB 475 ms), and ~40 ms per refresh. A command such as brightness takes ~0.5 ms. So the number of images is what costs, and so is how the wait looks. All of it lives in `src/fast.rs`, plus hooks in `src/device.rs` and `src/main.rs`.
 
 | | Upstream 0.11.1 | This branch |
 |---|---|---|
-| Image OpenDeck sends again unchanged | Re-encoded and re-sent | Skipped: the key already shows it |
-| JPEG quality | 90 | 75, about a third fewer bytes |
-| Whole-screen clear on page switch | Sent at once, so the screen goes dark | Held back: the old page stays until the new one has arrived, then they swap in one flush |
-| Single-key clear | Its own command, ~40 ms each, unbatched | A black image that joins the batched flush |
+| Image OpenDeck sends again unchanged | Re-encoded and re-sent | Skipped, because the key already shows it. Keys shared by pages cost nothing on a switch |
+| Whole-screen clear on page switch | Sent at once, so the screen goes black for most of a second | Ignored: the screen dims at once and the new page draws in waves, then brightness ramps back |
+| Key press | No feedback until OpenDeck redraws | The pressed key flashes (brightened, white frame) in ~10 ms, and its own image comes back if nothing replaces it |
+| Background key updates during a page switch | Queued ahead of the page | The page takes over, and the rest wait behind it |
+| Single-key clear | Its own command, ~40 ms each, unbatched | A black image that joins the batch |
 | Flush debounce | 50 ms | 20 ms (a page switch waits up to 300 ms for all its keys) |
-| Log | `Flushing pending updates` | `Flushed N images, B bytes in T ms` |
+| JPEG quality | 90 | 85 |
+| Log | `Flushing pending updates` | `Flushed N images, B bytes in W waves, T ms` |
 
-BMP-mode devices keep the upstream image path.
+The look is set in `~/Library/Application Support/opendeck/akp153-animation` and read on every flush. The file holds one wave order plus the words `dim` and `flash` to turn those on. Without the file the default is `diagonal dim flash`.
+
+| Order | Waves |
+|---|---|
+| `diagonal` | top-left to bottom-right |
+| `rows` | top to bottom |
+| `sweep` | column by column from the pressed key |
+| `rings` | rings around the pressed key |
+| `keys` | one key at a time |
+| `batch` | everything at once, the cheapest |
+
+Each wave adds one refresh, ~40 ms. BMP-mode devices keep the upstream image path.
 
 ## Install over an existing plugin
 

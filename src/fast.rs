@@ -1,19 +1,24 @@
 //! Faster page switches for slow-to-write devices (maddog-performance-optimization).
 //!
-//! Measured on a Mad Dog GK150K: the device takes about 3.8 ms per 512-byte image report, while a
-//! command report takes 0.5 ms. Every byte of JPEG on a page switch is visible latency, so this module:
+//! Measured on a Maddog GK150K: the device needs ~30 ms per key image whatever its size (15 images
+//! of 15 KB took 442 ms, of 30 KB 475 ms), while a command report (brightness, refresh, keep-alive)
+//! takes ~0.5 ms. So the number of images is what costs, and this module:
 //!
 //! - skips images identical to what the key already shows (OpenDeck redraws every key on a switch);
-//! - encodes at a lower JPEG quality (90 in mirajazz), which sends about a third fewer bytes;
-//! - turns clears into black images, so they join the batched flush instead of blocking one by one;
-//! - ignores OpenDeck's "clear the whole screen" on a page switch, so the old page stays up instead of
-//!   going dark, and draws the new page as a wave starting at the key that was pressed: the device
-//!   needs ~30 ms per image whatever its size, so a whole page takes ~0.45 s, and showing it in rings
-//!   (a refresh after each) answers the press at once instead of after the last image.
+//! - turns clears into black images, so they join the batch instead of blocking ~40 ms each;
+//! - ignores OpenDeck's "clear the whole screen" on a page switch, so the screen never goes black;
+//! - answers a press at once: the pressed key flashes (one image, ~6 ms) before anything else;
+//! - on a page switch dims the screen at once (a command, ~0.5 ms), draws the new page in waves
+//!   (top-left to bottom-right by default) and brings the brightness back up when it is in;
+//! - lets a page switch overtake background key updates that are being sent.
+//!
+//! The look is set in `~/Library/Application Support/opendeck/akp153-animation`, read on every flush:
+//! one wave order (`diagonal`, `rings`, `sweep`, `rows`, `keys`, `batch`) plus the words `dim` and
+//! `flash` to turn those on. Default: `diagonal dim flash`.
 
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
-use image::{ColorType, DynamicImage};
+use image::{ColorType, DynamicImage, Rgba};
 use mirajazz::device::Device;
 use mirajazz::error::MirajazzError;
 use mirajazz::types::{ImageFormat, ImageMirroring, ImageMode, ImageRotation};
@@ -24,8 +29,8 @@ use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
-/// JPEG quality for key images; mirajazz uses 90.
-pub const JPEG_QUALITY: u8 = 75;
+/// JPEG quality for key images; mirajazz uses 90. Size barely matters on this device, so stay sharp.
+pub const JPEG_QUALITY: u8 = 85;
 
 /// Quiet window before a flush; upstream uses 50 ms.
 pub const DEBOUNCE: Duration = Duration::from_millis(20);
@@ -33,26 +38,72 @@ pub const DEBOUNCE: Duration = Duration::from_millis(20);
 /// After a page switch, how long to wait for the new page's keys before blanking the ones that never came.
 pub const PAGE_TIMEOUT: Duration = Duration::from_millis(300);
 
+/// Brightness while a page is being drawn, and the steps back up afterwards.
+const DIM: u8 = 12;
+const RAMP_STEPS: u8 = 4;
+const RAMP_STEP: Duration = Duration::from_millis(25);
+
+/// How long a flashed key may stay highlighted when nothing redraws it.
+const FLASH_HOLD: Duration = Duration::from_millis(160);
+
 /// Hash of the black image used for cleared keys.
 const BLACK: u64 = 0;
+
+/// Grid of OpenDeck positions: 3 rows of 6, the side keys being the last column.
+const COLUMNS: i32 = 6;
 
 #[derive(Default)]
 pub struct DeviceState {
     /// What each key (OpenDeck position) shows on the hardware, as a hash of the image OpenDeck sent.
     shown: HashMap<u8, u64>,
+    /// The image behind each shown hash, to flash it or put it back.
+    source: HashMap<u8, (u64, DynamicImage)>,
+    /// The last key pressed and when: where `rings` and `sweep` start.
+    press: Option<(Instant, u8)>,
     /// Keys a page switch is still waiting for, and when the switch began.
     page: Option<(Instant, HashSet<u8>)>,
+    /// Counts page switches, so a background batch can notice one started and step aside.
+    switches: u64,
+    /// The screen is dimmed for a page switch.
+    dimmed: bool,
+    /// Brightness OpenDeck asked for.
+    brightness: Option<u8>,
     /// JPEGs waiting to be sent, by OpenDeck position.
     pending: HashMap<u8, Vec<u8>>,
-    /// The last key pressed (OpenDeck position) and when, where a page wave starts.
-    press: Option<(Instant, u8)>,
 }
-
-/// Grid of OpenDeck positions: 3 rows of 6, the side keys being the last column.
-const COLUMNS: i32 = 6;
 
 pub static STATE: LazyLock<Mutex<HashMap<String, DeviceState>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Held for every write sequence: an image is several reports, and a command slipped between them
+/// would be read as image data.
+pub static WIRE: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+pub struct Look {
+    pub order: String,
+    pub dim: bool,
+    pub flash: bool,
+}
+
+pub fn look() -> Look {
+    let text = std::env::var_os("HOME")
+        .map(|home| {
+            std::path::Path::new(&home).join("Library/Application Support/opendeck/akp153-animation")
+        })
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_else(|| "diagonal dim flash".to_string());
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let orders = ["diagonal", "rings", "sweep", "rows", "keys", "batch"];
+    Look {
+        order: words
+            .iter()
+            .find(|w| orders.contains(w))
+            .unwrap_or(&"diagonal")
+            .to_string(),
+        dim: words.contains(&"dim"),
+        flash: words.contains(&"flash"),
+    }
+}
 
 pub fn hash(bytes: &[u8]) -> u64 {
     let mut h = DefaultHasher::new();
@@ -66,7 +117,8 @@ pub enum Plan {
     Send,
 }
 
-/// Records that `position` will show `image_hash` (BLACK for a clear) and says whether it needs sending.
+/// Records that `position` will show the image with `image_hash` (BLACK for a clear) and says
+/// whether it needs sending.
 pub async fn plan(id: &str, position: u8, image_hash: u64) -> Plan {
     let mut states = STATE.lock().await;
     let state = states.entry(id.to_string()).or_default();
@@ -80,9 +132,11 @@ pub async fn plan(id: &str, position: u8, image_hash: u64) -> Plan {
     Plan::Send
 }
 
-pub async fn enqueue(id: &str, position: u8, jpeg: Vec<u8>) {
+/// Keeps the decoded image of what a key shows, for flashing it.
+pub async fn remember(id: &str, position: u8, image_hash: u64, image: DynamicImage) {
     let mut states = STATE.lock().await;
-    states.entry(id.to_string()).or_default().pending.insert(position, jpeg);
+    let state = states.entry(id.to_string()).or_default();
+    state.source.insert(position, (image_hash, image));
 }
 
 pub async fn pressed(id: &str, position: u8) {
@@ -90,104 +144,51 @@ pub async fn pressed(id: &str, position: u8) {
     states.entry(id.to_string()).or_default().press = Some((Instant::now(), position));
 }
 
+pub async fn enqueue(id: &str, position: u8, jpeg: Vec<u8>) {
+    let mut states = STATE.lock().await;
+    states.entry(id.to_string()).or_default().pending.insert(position, jpeg);
+}
+
 /// OpenDeck cleared the whole screen: a page switch. Start waiting for all `keys` positions.
-pub async fn page_switch(id: &str, keys: usize) {
+pub async fn page_switch(id: &str, keys: usize) -> bool {
     let mut states = STATE.lock().await;
     let state = states.entry(id.to_string()).or_default();
     state.page = Some((Instant::now(), (0..keys as u8).collect()));
+    state.switches += 1;
+    let dim = !state.dimmed && look().dim;
+    state.dimmed |= dim;
+    dim
 }
 
-/// How a page appears, read from `~/Library/Application Support/opendeck/akp153-animation` on every
-/// flush so it can be compared live: `wave` (rings from the pressed key, the default), `sweep`
-/// (column by column from the pressed key's side), `rows` (top to bottom), `keys` (one key at a time,
-/// in rings) or `batch` (all at once, like upstream).
-fn animation() -> String {
-    std::env::var_os("HOME")
-        .map(|home| {
-            std::path::Path::new(&home).join("Library/Application Support/opendeck/akp153-animation")
-        })
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "wave".to_string())
+pub async fn switches(id: &str) -> u64 {
+    STATE.lock().await.get(id).map(|s| s.switches).unwrap_or(0)
 }
 
-/// Takes the queued images in waves, each shown as soon as it is in. With nothing pressed recently,
-/// or only a few images, everything is one wave.
-pub async fn take_waves(id: &str) -> Vec<Vec<(u8, Vec<u8>)>> {
+/// After a page is in: whether the screen was dimmed for it, and the brightness to go back to.
+pub async fn undim(id: &str) -> Option<u8> {
     let mut states = STATE.lock().await;
-    let Some(state) = states.get_mut(id) else {
-        return vec![];
-    };
-    let mut images: Vec<(u8, Vec<u8>)> = state.pending.drain().collect();
-    let origin = state
-        .press
-        .filter(|(at, _)| at.elapsed() < Duration::from_secs(2))
-        .map(|(_, p)| p as i32);
-    let mode = animation();
-    let Some(origin) = origin.filter(|_| images.len() > 3 && mode != "batch") else {
-        return if images.is_empty() { vec![] } else { vec![images] };
-    };
-    let (or, oc) = (origin / COLUMNS, origin % COLUMNS);
-    let ring = |p: u8| {
-        let (r, c) = (p as i32 / COLUMNS, p as i32 % COLUMNS);
-        (r - or).abs().max((c - oc).abs())
-    };
-    // (wave number, order inside it)
-    let order = |p: u8| -> (i32, i32) {
-        let (r, c) = (p as i32 / COLUMNS, p as i32 % COLUMNS);
-        match mode.as_str() {
-            "sweep" => ((c - oc).abs(), r),
-            "rows" => (r, c),
-            "keys" => (ring(p) * 100 + p as i32, 0),
-            _ => (ring(p), p as i32),
-        }
-    };
-    images.sort_by_key(|(p, _)| order(*p));
-    let mut waves: Vec<Vec<(u8, Vec<u8>)>> = vec![];
-    let mut last = i32::MIN;
-    for (p, jpeg) in images {
-        if order(p).0 != last {
-            waves.push(vec![]);
-            last = order(p).0;
-        }
-        waves.last_mut().unwrap().push((p, jpeg));
+    let state = states.get_mut(id)?;
+    if !state.dimmed || state.page.is_some() || !state.pending.is_empty() {
+        return None;
     }
-    waves
+    state.dimmed = false;
+    Some(state.brightness.unwrap_or(50))
 }
 
-/// Sends one JPEG to a device key the way mirajazz does: a BAT header, then the data in reports.
-pub async fn send_image(
-    device: &Device,
-    packet_size: usize,
-    key: u8,
-    jpeg: &[u8],
-) -> Result<(), MirajazzError> {
-    let mut header = vec![
-        0x00, 0x43, 0x52, 0x54, 0x00, 0x00, 0x42, 0x41, 0x54, 0x00, 0x00,
-        (jpeg.len() >> 8) as u8,
-        jpeg.len() as u8,
-        key + 1,
-    ];
-    device.write_extended_data(&mut header).await?;
-    for chunk in jpeg.chunks(packet_size) {
-        let mut report = Vec::with_capacity(packet_size + 1);
-        report.push(0x00);
-        report.extend_from_slice(chunk);
-        report.resize(packet_size + 1, 0);
-        device.write_data(&report).await?;
-    }
-    Ok(())
+pub async fn set_brightness(id: &str, percent: u8) {
+    STATE.lock().await.entry(id.to_string()).or_default().brightness = Some(percent);
 }
 
-/// Shows what has been sent so far.
-pub async fn refresh(device: &Device) -> Result<(), MirajazzError> {
-    let mut stp = vec![0x00, 0x43, 0x52, 0x54, 0x00, 0x00, 0x53, 0x54, 0x50];
-    device.write_extended_data(&mut stp).await
+/// Whether the screen is dimmed for a page switch, so OpenDeck's brightness waits for the ramp.
+pub async fn dimmed(id: &str) -> bool {
+    STATE.lock().await.get(id).is_some_and(|s| s.dimmed)
 }
 
 /// The hardware was cleared for real (e.g. on connect): nothing is known to be shown.
 pub async fn forget(id: &str) {
-    STATE.lock().await.remove(id);
+    let mut states = STATE.lock().await;
+    let brightness = states.get(id).and_then(|s| s.brightness);
+    states.insert(id.to_string(), DeviceState { brightness, ..Default::default() });
 }
 
 /// Before a flush: whether a page switch is still waiting for keys (and for how much longer),
@@ -217,6 +218,144 @@ pub async fn page_wait(id: &str) -> PageWait {
     let missing: Vec<u8> = waiting.iter().copied().collect();
     state.page = None;
     PageWait::Blank(missing)
+}
+
+/// Takes the queued images in waves, each shown as soon as it is in. `rings` and `sweep` start at
+/// the key pressed just before. A few images, or `batch`, make a single wave.
+pub async fn take_waves(id: &str) -> Vec<Vec<(u8, Vec<u8>)>> {
+    let mut states = STATE.lock().await;
+    let Some(state) = states.get_mut(id) else {
+        return vec![];
+    };
+    let origin = state
+        .press
+        .filter(|(at, _)| at.elapsed() < Duration::from_secs(2))
+        .map(|(_, p)| p);
+    let mut images: Vec<(u8, Vec<u8>)> = state.pending.drain().collect();
+    let order = look().order;
+    if images.len() <= 3 || order == "batch" {
+        return if images.is_empty() { vec![] } else { vec![images] };
+    }
+    let origin = origin.map(|p| p as i32).unwrap_or(0);
+    let (or, oc) = (origin / COLUMNS, origin % COLUMNS);
+    // (wave number, order inside it)
+    let place = |p: u8| -> (i32, i32) {
+        let (r, c) = (p as i32 / COLUMNS, p as i32 % COLUMNS);
+        let ring = (r - or).abs().max((c - oc).abs());
+        match order.as_str() {
+            "rings" => (ring, p as i32),
+            "sweep" => ((c - oc).abs(), r),
+            "rows" => (r, c),
+            "keys" => (p as i32, 0),
+            _ => (r + c, r), // diagonal: left to right and top to bottom at once
+        }
+    };
+    images.sort_by_key(|(p, _)| place(*p));
+    let mut waves: Vec<Vec<(u8, Vec<u8>)>> = vec![];
+    let mut last = i32::MIN;
+    for (p, jpeg) in images {
+        if place(p).0 != last {
+            waves.push(vec![]);
+            last = place(p).0;
+        }
+        waves.last_mut().unwrap().push((p, jpeg));
+    }
+    waves
+}
+
+/// Puts images back in the queue after a page switch interrupted their batch, unless newer ones came.
+pub async fn requeue(id: &str, images: Vec<(u8, Vec<u8>)>) {
+    let mut states = STATE.lock().await;
+    let state = states.entry(id.to_string()).or_default();
+    for (p, jpeg) in images {
+        state.pending.entry(p).or_insert(jpeg);
+    }
+}
+
+/// The pressed key, brightened with a white frame, and forgotten as shown so whatever comes next is sent.
+pub async fn flash_image(id: &str, position: u8) -> Option<DynamicImage> {
+    if !look().flash {
+        return None;
+    }
+    let mut states = STATE.lock().await;
+    let state = states.get_mut(id)?;
+    let (_, source) = state.source.get(&position)?.clone();
+    state.shown.remove(&position);
+    let mut image = source.brighten(45).to_rgba8();
+    let (w, h) = image.dimensions();
+    let border = (w / 16).max(3);
+    for (x, y, px) in image.enumerate_pixels_mut() {
+        if x < border || y < border || x >= w - border || y >= h - border {
+            *px = Rgba([255, 255, 255, 255]);
+        }
+    }
+    Some(DynamicImage::ImageRgba8(image))
+}
+
+/// After a flash: if nothing redrew the key, put its own image back.
+pub async fn unflash(id: &str, position: u8) -> Option<(u64, DynamicImage)> {
+    tokio::time::sleep(FLASH_HOLD).await;
+    let mut states = STATE.lock().await;
+    let state = states.get_mut(id)?;
+    if state.shown.contains_key(&position) || state.pending.contains_key(&position) {
+        return None; // the page or the plugin already drew something new there
+    }
+    state.source.get(&position).cloned()
+}
+
+/// Sends one JPEG to a device key the way mirajazz does: a BAT header, then the data in reports.
+/// The caller holds [WIRE].
+pub async fn send_image(
+    device: &Device,
+    packet_size: usize,
+    key: u8,
+    jpeg: &[u8],
+) -> Result<(), MirajazzError> {
+    let mut header = vec![
+        0x00, 0x43, 0x52, 0x54, 0x00, 0x00, 0x42, 0x41, 0x54, 0x00, 0x00,
+        (jpeg.len() >> 8) as u8,
+        jpeg.len() as u8,
+        key + 1,
+    ];
+    device.write_extended_data(&mut header).await?;
+    for chunk in jpeg.chunks(packet_size) {
+        let mut report = Vec::with_capacity(packet_size + 1);
+        report.push(0x00);
+        report.extend_from_slice(chunk);
+        report.resize(packet_size + 1, 0);
+        device.write_data(&report).await?;
+    }
+    Ok(())
+}
+
+/// Shows what has been sent so far. The caller holds [WIRE].
+pub async fn refresh(device: &Device) -> Result<(), MirajazzError> {
+    let mut stp = vec![0x00, 0x43, 0x52, 0x54, 0x00, 0x00, 0x53, 0x54, 0x50];
+    device.write_extended_data(&mut stp).await
+}
+
+/// Brightness straight away, without waiting for a page. The caller holds [WIRE].
+pub async fn brightness(device: &Device, percent: u8) -> Result<(), MirajazzError> {
+    device.set_brightness(percent).await
+}
+
+/// Back from the dim level to `target` in a few quick steps.
+pub async fn ramp_up(device: &Device, target: u8) -> Result<(), MirajazzError> {
+    for step in 1..=RAMP_STEPS {
+        let level = DIM as u32 + (target.saturating_sub(DIM) as u32 * step as u32) / RAMP_STEPS as u32;
+        {
+            let _wire = WIRE.lock().await;
+            brightness(device, level as u8).await?;
+        }
+        if step < RAMP_STEPS {
+            tokio::time::sleep(RAMP_STEP).await;
+        }
+    }
+    Ok(())
+}
+
+pub fn dim_level() -> u8 {
+    DIM
 }
 
 pub fn black_hash() -> u64 {

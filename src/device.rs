@@ -225,6 +225,7 @@ async fn device_events_task(candidate: &CandidateDevice) -> Result<(), MirajazzE
                 match update {
                     DeviceStateUpdate::ButtonDown(key) => {
                         fast::pressed(&id, key).await;
+                        tokio::spawn(flash(id.clone(), key));
                         outbound.key_down(id, key).await.unwrap()
                     }
                     DeviceStateUpdate::ButtonUp(key) => outbound.key_up(id, key).await.unwrap(),
@@ -269,7 +270,8 @@ pub async fn handle_set_image(
                 return Ok(()); // Not a fatal error, enough to just log it
             }
 
-            if let fast::Plan::Skip = fast::plan(id, position, fast::hash(&body)).await {
+            let image_hash = fast::hash(&body);
+            if let fast::Plan::Skip = fast::plan(id, position, image_hash).await {
                 log::info!("Button {} already shows this image", position);
                 notify_flush(id).await; // a page switch may be waiting for this key
                 return Ok(());
@@ -279,6 +281,7 @@ pub async fn handle_set_image(
 
             let image = load_from_memory_with_format(body.as_slice(), image::ImageFormat::Jpeg)?;
             let format = get_image_format_for_key(&kind, position);
+            fast::remember(id, position, image_hash, image.clone()).await;
 
             if matches!(format.mode, ImageMode::JPEG) {
                 fast::enqueue(id, position, fast::convert(format, image)?).await;
@@ -294,6 +297,8 @@ pub async fn handle_set_image(
             // A black image instead of the device's clear command: it joins the batched flush,
             // while each clear command blocks for about 40 ms.
             if let fast::Plan::Send = fast::plan(id, position, fast::black_hash()).await {
+                let format = get_image_format_for_key(&kind, position);
+                fast::remember(id, position, fast::black_hash(), fast::black(&format)).await;
                 queue_black(device, id, position).await?;
             }
             notify_flush(id).await;
@@ -301,7 +306,11 @@ pub async fn handle_set_image(
         (None, None) => {
             // OpenDeck clears the whole screen before drawing a new page. Keep the old page up instead;
             // the flush task waits for the new page's keys and swaps them in at once.
-            fast::page_switch(id, KEY_COUNT).await;
+            // Dimming answers the press at once and hides the keys changing one wave at a time.
+            if fast::page_switch(id, KEY_COUNT).await {
+                let _wire = fast::WIRE.lock().await;
+                fast::brightness(device, fast::dim_level()).await?;
+            }
             notify_flush(id).await;
         }
         _ => {}
@@ -328,20 +337,36 @@ async fn queue_black(device: &Device, id: &str, position: u8) -> Result<(), Mira
     }
 }
 
-/// Sends queued images wave by wave, showing each wave as soon as it is in.
+/// Sends queued images wave by wave, showing each wave as soon as it is in. A page switch that starts
+/// meanwhile takes over: the rest of this batch goes back in the queue behind the new page.
 async fn send_waves(device: &Device, id: &str) -> Result<(), MirajazzError> {
     let kind = Kind::from_vid_pid(device.vid, device.pid).unwrap();
     let packet_size = if kind.protocol_version() >= 2 { 1024 } else { 512 };
     let started = std::time::Instant::now();
-    let waves = fast::take_waves(id).await;
-    let (mut images, mut bytes) = (0, 0);
-    for wave in &waves {
-        for (position, jpeg) in wave {
-            fast::send_image(device, packet_size, opendeck_to_device(*position), jpeg).await?;
+    let switches = fast::switches(id).await;
+    let mut waves = fast::take_waves(id).await.into_iter();
+    let (mut images, mut bytes, mut shown_waves) = (0, 0, 0);
+    while let Some(wave) = waves.next() {
+        let mut wave = wave.into_iter();
+        while let Some((position, jpeg)) = wave.next() {
+            if fast::switches(id).await != switches {
+                let rest: Vec<_> = std::iter::once((position, jpeg))
+                    .chain(wave)
+                    .chain(waves.flatten())
+                    .collect();
+                log::info!("Page switch: {} background images wait", rest.len());
+                fast::requeue(id, rest).await;
+                let _wire = fast::WIRE.lock().await;
+                return fast::refresh(device).await;
+            }
+            let _wire = fast::WIRE.lock().await;
+            fast::send_image(device, packet_size, opendeck_to_device(position), &jpeg).await?;
             images += 1;
             bytes += jpeg.len();
         }
+        let _wire = fast::WIRE.lock().await;
         fast::refresh(device).await?;
+        shown_waves += 1;
     }
     device.flush().await?; // images of BMP-mode devices still go through mirajazz's cache
     if images > 0 {
@@ -349,9 +374,51 @@ async fn send_waves(device: &Device, id: &str) -> Result<(), MirajazzError> {
             "Flushed {} images, {} bytes in {} waves, {} ms",
             images,
             bytes,
-            waves.len(),
+            shown_waves,
             started.elapsed().as_millis()
         );
     }
+    if let Some(target) = fast::undim(id).await {
+        fast::ramp_up(device, target).await?;
+    }
     Ok(())
+}
+
+/// A key was pressed: show it brightened with a white frame straight away, and put its own image
+/// back if nothing replaces it soon.
+pub async fn flash(id: String, position: u8) {
+    let Some(image) = fast::flash_image(&id, position).await else {
+        return;
+    };
+    let send = async |image: image::DynamicImage| -> Result<(), MirajazzError> {
+        let guard = DEVICES.read().await;
+        let Some(device) = guard.get(&id) else {
+            return Ok(());
+        };
+        let kind = Kind::from_vid_pid(device.vid, device.pid).unwrap();
+        let format = get_image_format_for_key(&kind, position);
+        if !matches!(format.mode, ImageMode::JPEG) {
+            return Ok(());
+        }
+        let packet_size = if kind.protocol_version() >= 2 { 1024 } else { 512 };
+        let jpeg = fast::convert(format, image)?;
+        let _wire = fast::WIRE.lock().await;
+        fast::send_image(device, packet_size, opendeck_to_device(position), &jpeg).await?;
+        fast::refresh(device).await
+    };
+    if send(image).await.is_err() {
+        return;
+    }
+    if let Some((image_hash, image)) = fast::unflash(&id, position).await {
+        if let fast::Plan::Send = fast::plan(&id, position, image_hash).await {
+            let guard = DEVICES.read().await;
+            if let Some(device) = guard.get(&id) {
+                let kind = Kind::from_vid_pid(device.vid, device.pid).unwrap();
+                if let Ok(jpeg) = fast::convert(get_image_format_for_key(&kind, position), image) {
+                    fast::enqueue(&id, position, jpeg).await;
+                    notify_flush(&id).await;
+                }
+            }
+        }
+    }
 }
