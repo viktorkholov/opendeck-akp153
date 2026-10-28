@@ -347,7 +347,8 @@ async fn send_waves(device: &Device, id: &str) -> Result<(), MirajazzError> {
     let packet_size = if kind.protocol_version() >= 2 { 1024 } else { 512 };
     let started = std::time::Instant::now();
     let switches = fast::switches(id).await;
-    let mut waves = fast::take_waves(id).await.into_iter();
+    let refresh_each = fast::look().refresh;
+    let mut waves = fast::take_waves(id).await.into_iter().peekable();
     let (mut images, mut bytes, mut shown_waves) = (0, 0, 0);
     while let Some(wave) = waves.next() {
         let mut wave = wave.into_iter();
@@ -367,9 +368,11 @@ async fn send_waves(device: &Device, id: &str) -> Result<(), MirajazzError> {
             images += 1;
             bytes += jpeg.len();
         }
-        let _wire = fast::WIRE.lock().await;
-        fast::refresh(device).await?;
         shown_waves += 1;
+        if refresh_each || waves.peek().is_none() {
+            let _wire = fast::WIRE.lock().await;
+            fast::refresh(device).await?;
+        }
     }
     device.flush().await?; // images of BMP-mode devices still go through mirajazz's cache
     if images > 0 {

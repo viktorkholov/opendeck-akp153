@@ -33,7 +33,7 @@ use tokio::sync::Mutex;
 pub const JPEG_QUALITY: u8 = 85;
 
 /// Quiet window before a flush; upstream uses 50 ms.
-pub const DEBOUNCE: Duration = Duration::from_millis(20);
+pub const DEBOUNCE: Duration = Duration::from_millis(15);
 
 /// After a page switch, how long to wait for the new page's keys before blanking the ones that never came.
 pub const PAGE_TIMEOUT: Duration = Duration::from_millis(300);
@@ -83,6 +83,9 @@ pub struct Look {
     pub order: String,
     pub dim: bool,
     pub flash: bool,
+    /// Send a refresh (STP, ~40 ms) after every wave. The GK150K holds uploaded images until a
+    /// refresh, so without one per wave the page appears all at once at the end (~240 ms sooner).
+    pub refresh: bool,
 }
 
 pub fn look() -> Look {
@@ -102,6 +105,7 @@ pub fn look() -> Look {
             .to_string(),
         dim: words.contains(&"dim"),
         flash: words.contains(&"flash"),
+        refresh: !words.contains(&"once"),
     }
 }
 

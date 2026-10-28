@@ -30,7 +30,7 @@ Measured on the GK150K, the device needs ~30 ms per key image whatever its size 
 | Key press | No feedback until OpenDeck redraws | The pressed key flashes (brightened, white frame) in ~10 ms, and its own image comes back if nothing replaces it |
 | Background key updates during a page switch | Queued ahead of the page | The page takes over, and the rest wait behind it |
 | Single-key clear | Its own command, ~40 ms each, unbatched | A black image that joins the batch |
-| Flush debounce | 50 ms | 20 ms (a page switch waits up to 300 ms for all its keys) |
+| Flush debounce | 50 ms | 15 ms (a page switch waits up to 300 ms for all its keys) |
 | JPEG quality | 90 | 85 |
 | Log | `Flushing pending updates` | `Flushed N images, B bytes in W waves, T ms` |
 
@@ -46,7 +46,7 @@ The look is set in `~/Library/Application Support/opendeck/akp153-animation` and
 | `keys` | one key at a time |
 | `batch` | everything at once, the cheapest |
 
-Each wave adds one refresh, ~40 ms. BMP-mode devices keep the upstream image path.
+The GK150K holds uploaded images until a refresh, so every wave ends with one (~40 ms each). Add the word `once` to refresh only at the end: the page then appears all at once, ~240 ms sooner. BMP-mode devices keep the upstream image path.
 
 ## Install over an existing plugin
 
