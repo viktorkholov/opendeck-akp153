@@ -10,28 +10,39 @@ An unofficial plugin for Mirabox HSV293S-family devices
 
 <h1 align="center">SHOWCASE</h1>
 
-<p align="center">These GIFs are simulations of a 3×6 deck, timed with what was measured on a Maddog GK150K. They are not screen recordings. <code>docs/showcase.swift</code> renders them, and the tiles are neutral numbered demos.</p>
+<p align="center">The GIFs are simulations of a 3×6 deck. Their timings come from the driver's own log on a Maddog GK150K, which records how long after each press the new page was complete. They are not screen recordings. <code>docs/showcase.swift</code> renders them, and the tiles are neutral numbered demos.</p>
 
-## Before: upstream 0.11.1
+## Before: press, then wait ~1.2–1.3 s in the dark
 
-<p align="center"><img src="docs/upstream.gif" width="100%" alt="Upstream: the screen goes black right after the press and the new page appears all at once after ~0.73 s"></p>
+<p align="center"><img src="docs/upstream.gif" width="100%" alt="Upstream: the screen goes black right after the press and the new page appears all at once about 1.25 s later"></p>
 
-When you press a page key, the whole screen goes black at once. It stays black until every key of the new page has been sent, about **0.73 s** on a full page. On a page with empty keys it takes up to **~1.2 s**, because each empty key is cleared with its own ~40 ms command first. Then the page appears all at once.
+With upstream 0.11.1, the whole screen goes black the moment you press a page key. Then you wait, and **~1.2–1.3 s** later the new page appears all at once.
 
-## This fork: `snake`
+This was measured on a deck whose pages had empty keys. Upstream clears each empty key with its own command before it sends anything. A page with every key filled takes ~0.75 s, but the screen is just as black the whole time.
 
-<p align="center"><img src="docs/page-snake.gif" width="100%" alt="This fork: nothing goes black; the new page replaces the old one key by key down and up the columns"></p>
+## After: nothing goes black, and the page starts changing at once
 
-Nothing goes black. The old page stays, and the new one replaces it key by key, down and up the columns. The first new key shows **~0.16 s** after the press and the whole page by ~1.1–1.2 s. The `pages` key and the side screen are not redrawn, because they look the same on both pages.
+The fork drops the black screen. The old page stays up, and the new one draws over it starting **~0.15 s** after the press. Keys that look the same on both pages, like `pages` and the side screen, aren't redrawn at all.
 
-## Or choose `wave` or `classic`
+How the new page appears is up to you.
 
-| `wave` | `classic` |
-|---|---|
-| ![wave](docs/page-wave.gif) | ![classic](docs/page-classic.gif) |
-| A diagonal from the top left. First keys at ~0.16 s, whole page ~0.85 s | Everything at once, but without the black screen. Whole page ~0.6 s |
+### `wave`: ~0.75 s from press to the whole page
 
-Every wave ends with a ~40 ms refresh, so smoother animations take longer. `classic` is the fastest.
+<p align="center"><img src="docs/page-wave.gif" width="100%" alt="This fork, wave: the new page sweeps in diagonally from the top left, complete about 0.75 s after the press"></p>
+
+A diagonal from the top left. Measured: **0.75 s** median from the press to the complete page (0.71–0.77 s over 17 switches).
+
+### `snake`: ~1.08 s
+
+<p align="center"><img src="docs/page-snake.gif" width="100%" alt="This fork, snake: the new page replaces the old one key by key down and up the columns"></p>
+
+One key at a time, down and up the columns. Measured: **1.08 s** median (1.02–1.11 s over 15 switches). Each key is its own wave, and every wave ends with a ~38 ms refresh, so the snake costs more than the wave.
+
+### `classic`: ~0.55 s
+
+<p align="center"><img src="docs/page-classic.gif" width="50%" alt="This fork, classic: the whole page at once, without the black screen"></p>
+
+The whole page at once, like upstream but without the black screen. ~0.55 s, estimated from the send time.
 
 ## Desktops and folders
 
@@ -61,14 +72,14 @@ The driver needs only the nav key's slot (`nav 16`) to tell switches apart. A pr
 | | Upstream 0.11.1 | This fork |
 |---|---|---|
 | Right after a press | The whole screen goes black | Nothing goes dark; the old page stays |
-| First new key on screen | ~0.73 s (up to ~1.2 s with empty keys) | **~0.16 s** |
-| Whole page on screen | ~0.73 s (up to ~1.2 s), all at once | `classic` ~0.6 s · `wave` ~0.85 s · `snake` ~1.2 s |
+| The page starts changing | When it is complete, ~1.2–1.3 s (~0.75 s with no empty keys) | **~0.15 s** after the press |
+| The whole new page | ~1.2–1.3 s, all at once | `wave` **0.75 s** · `snake` **1.08 s** · `classic` ~0.55 s |
+| Folders | Not told apart from pages | Open with `rsnake` (~1.03–1.11 s), close with `snake` (~1.08–1.16 s) |
 | Keys that look the same on both pages | Redrawn on every switch | Skipped, saving ~30 ms each |
-| Empty keys | Cleared one by one, ~40 ms each | A dark image in the same batch |
-| Desktops and folders | Every switch looks the same | Desktops use the page animation. Folders open with `rsnake` and close with `snake` |
+| Empty keys | Cleared one by one, ~40 ms each, before anything is sent | A dark image in the same batch |
 | Nav key and side screen | Go black with everything else | Stay lit through every switch |
 | Background key updates during a switch | Sent ahead of the page | Wait behind the page |
-| Log | `Flushing pending updates` | `Flushed N images, B bytes in W waves, T ms` |
+| Log | `Flushing pending updates` | `Flushed N images, B bytes in W waves, T ms, P ms after the press` |
 
 ## Why page switches were slow
 
@@ -138,13 +149,13 @@ A file with a single line in the old format, e.g. `wave`, sets the page animatio
 
 | Animation | How the page appears | Time on the GK150K |
 |---|---|---|
-| `classic` | Everything at once, like upstream but without the black screen | ~0.6 s |
-| `wave` | One diagonal at a time, top-left to bottom-right | ~0.85 s |
-| `rwave` | The diagonal backwards, from the bottom right | ~0.85 s |
-| `snake` | One key at a time down and up the columns: 0, 6, 12, 13, 7, 1, 2, 8, 14, 3, 9, 15, 16, 10, 4 | ~1.2 s |
-| `rsnake` | The snake backwards. Each key goes straight to its final image, so a half-empty folder looks whole | ~1.1 s for 14 keys |
+| `classic` | Everything at once, like upstream but without the black screen | ~0.55 s (estimated) |
+| `wave` | One diagonal at a time, top-left to bottom-right | 0.75 s (measured, press to page) |
+| `rwave` | The diagonal backwards, from the bottom right | ~0.75 s |
+| `snake` | One key at a time down and up the columns: 0, 6, 12, 13, 7, 1, 2, 8, 14, 3, 9, 15, 16, 10, 4 | 1.08 s (measured) |
+| `rsnake` | The snake backwards. Each key goes straight to its final image, so a half-empty folder looks whole | 1.03–1.11 s (measured, opening a folder) |
 
-Each wave costs a ~40 ms refresh, so more waves look smoother and take longer.
+Each wave costs a ~38 ms refresh, so more waves look smoother and take longer.
 
 To change animations from the deck itself, use keys that run a shell command to rewrite the file.
 

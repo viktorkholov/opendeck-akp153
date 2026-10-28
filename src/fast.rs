@@ -204,6 +204,11 @@ pub async fn page_switch(id: &str, keys: usize) {
     state.transition = Some(kind);
 }
 
+/// Milliseconds since the last key press, for the log.
+pub async fn since_press(id: &str) -> Option<u128> {
+    STATE.lock().await.get(id)?.press.map(|(at, _)| at.elapsed().as_millis())
+}
+
 pub async fn switches(id: &str) -> u64 {
     STATE.lock().await.get(id).map(|s| s.switches).unwrap_or(0)
 }

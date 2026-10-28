@@ -365,12 +365,19 @@ async fn send_waves(device: &Device, id: &str) -> Result<(), MirajazzError> {
     }
     device.flush().await?; // images of BMP-mode devices still go through mirajazz's cache
     if images > 0 {
+        // A page drawn within 3 s of a press counts from the press: what the user waited for.
+        let after_press = fast::since_press(id)
+            .await
+            .filter(|ms| *ms < 3000)
+            .map(|ms| format!(", {} ms after the press", ms))
+            .unwrap_or_default();
         log::info!(
-            "Flushed {} images, {} bytes in {} waves, {} ms",
+            "Flushed {} images, {} bytes in {} waves, {} ms{}",
             images,
             bytes,
             shown_waves,
-            started.elapsed().as_millis()
+            started.elapsed().as_millis(),
+            after_press
         );
     }
     Ok(())

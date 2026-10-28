@@ -3,10 +3,11 @@
 //
 //   swift docs/showcase.swift docs
 //
-// Timing model (ms after the key press):
-//   OpenDeck redraws the new page and the driver starts sending after ~130 (upstream: ~150);
-//   each key image then takes ~30, and each refresh (STP), which shows what was sent, ~40.
-//   Upstream also clears the whole screen at ~20, so the deck is black until its single refresh.
+// Timing model (ms after the key press), fitted to the driver's own log ("ms after the press"):
+//   the fork starts sending ~105 after the press; each key image takes ~30 and each refresh (STP),
+//   which shows what was sent, ~38. That gives wave ~0.75 s and snake ~1.06 s, as measured.
+//   Upstream clears the whole screen at ~20 and shows the new page ~1.25 s after the press, as
+//   measured on our deck: pages with empty keys made it clear each of them on its own first.
 import AppKit
 import ImageIO
 import UniformTypeIdentifiers
@@ -78,7 +79,7 @@ struct Timeline {
 }
 
 func upstream(_ from: Page, _ to: Page) -> Timeline {
-    let done = 150.0 + 18 * 30 + 40
+    let done = 1250.0
     var t = Timeline(black: (20, done))
     for p in 0..<18 { t.change[p] = done }
     return t
@@ -87,7 +88,7 @@ func upstream(_ from: Page, _ to: Page) -> Timeline {
 /// The fork: unchanged keys are skipped; controller and side go first; content in waves.
 func fork(_ from: Page, _ to: Page, order: String, vanish: Bool = false) -> Timeline {
     var t = Timeline()
-    var clock = 130.0
+    var clock = 105.0
     let changed = (0..<18).filter { from[$0] != to[$0] }
     let chrome = changed.filter { side.contains($0) || $0 == controller }
     var content = changed.filter { !chrome.contains($0) }
@@ -95,7 +96,7 @@ func fork(_ from: Page, _ to: Page, order: String, vanish: Bool = false) -> Time
         guard !keys.isEmpty else { return }
         clock += Double(keys.count) * 30
         for p in keys { t.change[p] = clock }
-        clock += 40
+        clock += 38
     }
     if vanish { // darken every content key first, then draw the folder's own keys
         let all = (0..<18).filter { !side.contains($0) && $0 != controller }
@@ -103,7 +104,7 @@ func fork(_ from: Page, _ to: Page, order: String, vanish: Bool = false) -> Time
         for p in all { t.dark[p] = (darkAt, darkAt) }
         for p in chrome { t.change[p] = darkAt }
         for p in all where to[p] == .empty { t.change[p] = darkAt }
-        clock = darkAt + 40
+        clock = darkAt + 38
         content = content.filter { to[$0] != .empty }
         for p in content { t.dark[p] = (darkAt, .infinity) }
         wave(content)
