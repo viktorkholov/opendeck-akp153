@@ -34,11 +34,11 @@ Measured on the GK150K, the device needs ~30 ms per key image whatever its size 
 | JPEG quality | 90 | 85 |
 | Log | `Flushing pending updates` | `Flushed N images, B bytes in W waves, T ms` |
 
-The look is set in `~/Library/Application Support/opendeck/akp153-animation` and read on every flush. The file holds one wave order plus the words `dim` and `flash` to turn those on. Without the file the default is `diagonal dim flash`.
+The look is set in `~/Library/Application Support/opendeck/akp153-animation` and read on every flush. The file holds one wave order plus the words `dim` and `flash` to turn those on. Without the file the default is `diagonal dim flash`; the GK150K setup uses `diagonal flash`.
 
 | Order | Waves |
 |---|---|
-| `diagonal` | top-left to bottom-right |
+| `diagonal` | top-left to bottom-right, in three bands |
 | `rows` | top to bottom |
 | `sweep` | column by column from the pressed key |
 | `rings` | rings around the pressed key |
