@@ -16,7 +16,7 @@ import UniformTypeIdentifiers
 let out = CommandLine.arguments.dropFirst().first ?? "docs"
 
 /// Part of every GIF's file name: GitHub caches README images by URL, so a new version needs a new name.
-let VERSION = "v3"
+let VERSION = "v4"
 
 /// Pixels per point, so the images stay sharp when the README shows them large.
 let SCALE: CGFloat = 2
@@ -127,6 +127,11 @@ func fork(_ from: Page, _ to: Page, order: String, vanish: Bool = false) -> Time
         }
     }
     for k in Set(content.map(key)).sorted() { wave(content.filter { key($0) == k }) }
+    // One long batch measured slower than the model gives (0.60 s median against ~0.55 s), so the
+    // classic page shows when it did on the deck.
+    if order == "classic" {
+        for p in content { t.change[p] = max(t.change[p] ?? 0, 600) }
+    }
     return t
 }
 
