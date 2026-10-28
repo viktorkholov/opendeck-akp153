@@ -93,7 +93,7 @@ pub fn look() -> Look {
         .and_then(|path| std::fs::read_to_string(path).ok())
         .unwrap_or_else(|| "diagonal dim flash".to_string());
     let words: Vec<&str> = text.split_whitespace().collect();
-    let orders = ["diagonal", "rings", "sweep", "rows", "keys", "batch"];
+    let orders = ["diagonal", "bands", "rings", "sweep", "rows", "keys", "batch"];
     Look {
         order: words
             .iter()
@@ -257,9 +257,10 @@ pub async fn take_waves(id: &str) -> Vec<Vec<(u8, Vec<u8>)>> {
             "sweep" => ((c - oc).abs(), r),
             "rows" => (r, c),
             "keys" => (p as i32, 0),
-            // diagonal: left to right and top to bottom at once, in three bands, since every
-            // wave costs a ~40 ms refresh
-            _ => ((r + c) * 3 / (COLUMNS + 2), r + c),
+            // bands: the diagonal in three waves, ~160 ms faster since every wave costs a refresh
+            "bands" => ((r + c) * 3 / (COLUMNS + 2), r + c),
+            _ => (r + c, r), // diagonal: left to right and top to bottom at once
+
         }
     };
     images.sort_by_key(|(p, _)| place(*p));
