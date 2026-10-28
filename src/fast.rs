@@ -199,6 +199,16 @@ pub enum PageWait {
     Blank(Vec<u8>),
 }
 
+/// Whether a page switch has all its keys, so the flush need not wait out the quiet window.
+pub async fn page_complete(id: &str) -> bool {
+    STATE
+        .lock()
+        .await
+        .get(id)
+        .and_then(|s| s.page.as_ref())
+        .is_some_and(|(_, waiting)| waiting.is_empty())
+}
+
 pub async fn page_wait(id: &str) -> PageWait {
     let mut states = STATE.lock().await;
     let Some(state) = states.get_mut(id) else {
@@ -247,7 +257,9 @@ pub async fn take_waves(id: &str) -> Vec<Vec<(u8, Vec<u8>)>> {
             "sweep" => ((c - oc).abs(), r),
             "rows" => (r, c),
             "keys" => (p as i32, 0),
-            _ => (r + c, r), // diagonal: left to right and top to bottom at once
+            // diagonal: left to right and top to bottom at once, in three bands, since every
+            // wave costs a ~40 ms refresh
+            _ => ((r + c) * 3 / (COLUMNS + 2), r + c),
         }
     };
     images.sort_by_key(|(p, _)| place(*p));

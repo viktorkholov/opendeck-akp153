@@ -146,6 +146,9 @@ async fn device_flush_task(id: &String, notify: Arc<Notify>, token: Cancellation
         // changes in one flush.
         loop {
             loop {
+                if fast::page_complete(id).await {
+                    break; // every key of the new page is in: no need to wait for quiet
+                }
                 tokio::select! {
                     _ = notify.notified() => {}
                     _ = token.cancelled() => return,
