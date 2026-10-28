@@ -167,9 +167,13 @@ pub async fn plan(id: &str, position: u8, image_hash: u64) -> Plan {
     Plan::Send
 }
 
+/// A key was pressed. Besides remembering it, forget what it showed: some devices blank a key on a
+/// press and rely on OpenDeck sending the same image again, which must then not be skipped.
 pub async fn pressed(id: &str, position: u8) {
     let mut states = STATE.lock().await;
-    states.entry(id.to_string()).or_default().press = Some((Instant::now(), position));
+    let state = states.entry(id.to_string()).or_default();
+    state.press = Some((Instant::now(), position));
+    state.shown.remove(&position);
 }
 
 pub async fn enqueue(id: &str, position: u8, jpeg: Vec<u8>) {
