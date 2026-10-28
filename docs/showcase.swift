@@ -189,6 +189,7 @@ func drawDeck(_ title: String, from: Page, to: Page, timeline tl: Timeline, pres
         ring.lineWidth = 3; hex(0xffffff, 0.9).setStroke(); ring.stroke()
     }
     text(title, 15, hex(0xffffff, 0.9), at: CGPoint(x: origin.x + 4, y: origin.y + deckH - HEADER + 8))
+    guard press >= 0 else { return } // a still, without a clock
     let clock = t < 0 ? "press" : String(format: "%.2f s", min(t, tl.end) / 1000)
     let done = t >= tl.end
     text(done ? "\(clock) ✓" : clock, 15, done ? hex(0x4ade80) : hex(0xffffff, 0.6),
@@ -254,3 +255,94 @@ gif("folder-dropped", [[
           timeline: fork(desktopA, folder, order: "classic", vanish: true), press: 3),
     Scene(title: "kept: rsnake", from: desktopA, to: folder, timeline: fork(desktopA, folder, order: "rsnake"), press: 3),
 ]])
+gif("tour", [
+    [Scene(title: "Desktop 1 → Desktop 2 · pages", from: desktopA, to: desktopB, timeline: fork(desktopA, desktopB, order: "wave"), press: controller)],
+    [Scene(title: "Desktop 2 → Desktop 1 · pages", from: desktopB, to: desktopA, timeline: fork(desktopB, desktopA, order: "wave"), press: controller)],
+    [Scene(title: "Desktop 1 → Folder · open", from: desktopA, to: folder, timeline: fork(desktopA, folder, order: "rsnake"), press: 3)],
+    [Scene(title: "Folder → Desktop 1 · back", from: folder, to: desktopA, timeline: fork(folder, desktopA, order: "snake"), press: controller)],
+])
+
+// MARK: the structure map
+
+/// A finished page, drawn at `scale` with its bottom-left corner at `origin`.
+func still(_ title: String, _ page: Page, at origin: CGPoint, scale: CGFloat) {
+    NSGraphicsContext.saveGraphicsState()
+    let transform = NSAffineTransform()
+    transform.translateX(by: origin.x, yBy: origin.y)
+    transform.scale(by: scale)
+    transform.concat()
+    drawDeck(title, from: page, to: page, timeline: Timeline(), press: -1, t: 1e9, origin: .zero)
+    NSGraphicsContext.restoreGraphicsState()
+}
+
+func arrow(from a: CGPoint, to b: CGPoint, _ label: String, labelAt: CGPoint, both: Bool = false) {
+    let line = NSBezierPath(); line.move(to: a); line.line(to: b); line.lineWidth = 2.5
+    hex(0xffffff, 0.75).setStroke(); line.stroke()
+    func head(at tip: CGPoint, from tail: CGPoint) {
+        let angle = atan2(tip.y - tail.y, tip.x - tail.x)
+        let p = NSBezierPath()
+        p.move(to: tip)
+        p.line(to: CGPoint(x: tip.x - 11 * cos(angle - 0.45), y: tip.y - 11 * sin(angle - 0.45)))
+        p.line(to: CGPoint(x: tip.x - 11 * cos(angle + 0.45), y: tip.y - 11 * sin(angle + 0.45)))
+        p.close(); hex(0xffffff, 0.75).setFill(); p.fill()
+    }
+    head(at: b, from: a)
+    if both { head(at: a, from: b) }
+    text(label, 13, hex(0xffffff, 0.85), at: labelAt, weight: .medium)
+}
+
+/// Outlines the three layers on a deck drawn by `still` at `origin` and `scale`.
+func layers(at origin: CGPoint, scale: CGFloat) {
+    func outline(_ p: Int, _ colour: NSColor) {
+        let r = keyRect(p, origin: .zero)
+        let rect = CGRect(x: origin.x + r.minX * scale, y: origin.y + r.minY * scale, width: r.width * scale, height: r.height * scale)
+        let path = NSBezierPath(roundedRect: rect.insetBy(dx: -2, dy: -2), xRadius: 8, yRadius: 8)
+        path.lineWidth = 3; colour.setStroke(); path.stroke()
+    }
+    for p in 0..<18 where !side.contains(p) && p != controller { outline(p, hex(0x60a5fa)) }
+    outline(controller, hex(0xfb923c))
+    let x = origin.x + (PAD + 5 * (K + GAP) + 5) * scale
+    let sideRect = CGRect(x: x, y: origin.y + PAD * scale, width: K * 0.9 * scale, height: (3 * K + 2 * GAP) * scale)
+    let path = NSBezierPath(roundedRect: sideRect.insetBy(dx: -2, dy: -2), xRadius: 8, yRadius: 8)
+    path.lineWidth = 3; hex(0x4ade80).setStroke(); path.stroke()
+}
+
+do {
+    let s: CGFloat = 0.62
+    let w = deckW * s, h = deckH * s, gap: CGFloat = 120
+    let size = CGSize(width: 2 * w + gap + 60, height: 2 * h + 150)
+    let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height),
+                               bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                               colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+    hex(0x18181b).setFill(); CGRect(origin: .zero, size: size).fill()
+    let top = size.height - h - 20, bottom: CGFloat = 70
+    let left: CGFloat = 30, right = left + w + gap
+    still("Desktop 1", desktopA, at: CGPoint(x: left, y: top), scale: s)
+    still("Desktop 2", desktopB, at: CGPoint(x: right, y: top), scale: s)
+    still("Folder (in a key of Desktop 1)", folder, at: CGPoint(x: left, y: bottom), scale: s)
+    still("Layers", desktopA, at: CGPoint(x: right, y: bottom), scale: s)
+    layers(at: CGPoint(x: right, y: bottom), scale: s)
+    let midY = top + (deckH - HEADER) * s / 2
+    arrow(from: CGPoint(x: left + w + 12, y: midY), to: CGPoint(x: right - 12, y: midY), "pages",
+          labelAt: CGPoint(x: left + w + gap / 2 - 18, y: midY + 8), both: true)
+    let folderKey = keyRect(3, origin: .zero)
+    let fx = left + folderKey.midX * s
+    arrow(from: CGPoint(x: fx, y: top - 6), to: CGPoint(x: fx, y: bottom + h + 4), "open", labelAt: CGPoint(x: fx + 8, y: top - 48))
+    let backKey = keyRect(controller, origin: .zero)
+    let bx = left + backKey.midX * s
+    arrow(from: CGPoint(x: bx, y: bottom + h + 4), to: CGPoint(x: bx, y: top - 6), "back", labelAt: CGPoint(x: bx + 8, y: top - 48))
+    let legend = [("controller: pages / back", hex(0xfb923c)), ("side screen", hex(0x4ade80)), ("content", hex(0x60a5fa))]
+    let widths = legend.map { 17 + NSAttributedString(string: $0.0, attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold)]).size().width + 16 }
+    var x = right + w - widths.reduce(0, +) + 16 // right-aligned under the Layers deck
+    for (name, colour) in legend {
+        let y: CGFloat = 30
+        colour.setFill(); NSBezierPath(roundedRect: CGRect(x: x, y: y + 3, width: 12, height: 12), xRadius: 3, yRadius: 3).fill()
+        text(name, 12, hex(0xffffff, 0.8), at: CGPoint(x: x + 17, y: y))
+        x += 17 + NSAttributedString(string: name, attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold)]).size().width + 16
+    }
+    NSGraphicsContext.restoreGraphicsState()
+    try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "\(out)/structure.png"))
+    print("structure.png")
+}

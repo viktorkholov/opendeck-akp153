@@ -25,6 +25,29 @@ Upstream clears the screen and keeps it black until the whole page has been sent
 | ![classic](docs/page-classic.gif) | ![wave](docs/page-wave.gif) | ![snake](docs/page-snake.gif) |
 | Everything at once, ~0.55 s | Diagonal from the top left, ~0.7 s | Down and up the columns, ~1.2 s |
 
+**Desktops and folders**
+
+![Desktop 1 and Desktop 2 swap with pages; a folder in a key of Desktop 1 opens and returns with back; the layers are controller, side screen and content](docs/structure.png)
+
+The deck has two kinds of pages:
+
+- **Desktops** sit side by side. The `pages` key moves to the next one, and after the last it wraps to the first.
+- **Folders** live in a key on a desktop, or inside another folder. In a folder the same slot holds `back`, which returns one level up.
+
+On every page the slots split into three layers:
+
+| Layer | Slots |
+|---|---|
+| Controller | `pages` or `back` |
+| Side screen | the last column |
+| Content | everything else |
+
+Only content animates.
+
+The driver needs only the nav key's slot (`nav 16`) to tell the switches apart. A press on it is a page switch, or closes a folder when one is open. A press on any other key that changes the page opens a folder. Desktops and folders themselves are ordinary OpenDeck profiles with Switch Profile keys, and the deck's layout generator writes them.
+
+![A tour: Desktop 1 to Desktop 2 and back with pages, then a folder opens and closes](docs/tour.gif)
+
 **Folders: open with `rsnake`, close with the mirror**
 
 ![A folder opens as a reverse snake, each key straight to its final image; back closes it with a snake](docs/folder.gif)
